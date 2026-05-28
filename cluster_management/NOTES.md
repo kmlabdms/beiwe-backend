@@ -135,6 +135,16 @@ The port-80 VirtualHost in `00_application.conf` serves the application directly
 
 ---
 
+## Sysadmin email is publicly visible
+
+`SYSTEM_ADMINISTRATOR_EMAIL` in `global_configuration.json` serves two purposes: it becomes the EB SNS Notification Endpoint (deployment events, health alarms) and is also propagated into `SYSADMIN_EMAILS` in the finalized settings, which the app renders in `footer.html` on every page — including the unauthenticated login page.
+
+Use a role address (e.g. `beiwe-ops@mylab.edu`) rather than a personal inbox: comfortable to display publicly, still monitored for AWS alerts.
+
+If you want to fully decouple them, a `SYSADMIN_DISPLAY_EMAIL` field could be added for the footer (the app already renders it as empty if the value is missing or not a valid address, per `config/jinja2.py:28-29`), but `configuration_utils.py` validation would need to be updated to allow it to be optional.
+
+---
+
 ## Private subnets for processing servers
 
 **Status:** not implemented — known limitation

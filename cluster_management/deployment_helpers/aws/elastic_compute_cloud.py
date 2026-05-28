@@ -77,7 +77,7 @@ def get_instances_by_name(instance_name):
                 {'Name': 'tag:Name',
                  'Values': [instance_name]},
                 {'Name': 'instance-state-name',
-                 'Values': ['running']},
+                 'Values': ['running', 'stopped']},
             ]
     )['Reservations']
     
@@ -169,6 +169,17 @@ def get_or_create_rabbit_mq_security_group(eb_environment_name):
 #################################### Instance Creation #############################################
 ####################################################################################################
 
+def _get_vpc_subnet_id() -> str:
+    """Return a subnet ID from the configured Beiwe VPC for processing server placement."""
+    vpc_id = GLOBAL_CONFIGURATION['VPC_ID']
+    subnets = create_ec2_client().describe_subnets(
+        Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+    )["Subnets"]
+    if not subnets:
+        raise RuntimeError(f"No subnets found in VPC {vpc_id}. Cannot launch processing server.")
+    return subnets[0]["SubnetId"]
+
+
 def create_server(eb_environment_name, aws_server_type, security_groups=None):
     ec2_client = create_ec2_client()
     if security_groups is None:
@@ -194,10 +205,7 @@ def create_server(eb_environment_name, aws_server_type, security_groups=None):
             KeyName=GLOBAL_CONFIGURATION['DEPLOYMENT_KEY_NAME'],
             InstanceType=aws_server_type,
             SecurityGroupIds=security_groups,
-            # NetworkInterfaces=[{"DeviceIndex": 0,
-            #                     "AssociatePublicIpAddress": True,
-            #                     "SubnetId": config.public_subnet_id,
-            #                     "Groups": security_groups_list}],
+            SubnetId=_get_vpc_subnet_id(),
             # IamInstanceProfile={"Arn": MANAGER_IAM_ROLE},
             BlockDeviceMappings=[ebs_parameters],
             Monitoring={'Enabled': False},
@@ -264,15 +272,9 @@ def create_processing_control_server(eb_environment_name, aws_server_type):
     
     manager_info = get_manager_instance_by_eb_environment_name(eb_environment_name)
     if manager_info is not None:
-        if manager_info['InstanceType'] == aws_server_type:
-            msg = "A manager server, %s, already exists for this environment, and it is of the provided type (%s)." % (manager_info['InstanceId'], aws_server_type)
-        else:
-            msg = "A manager server, %s, already exists for this environment." % manager_info['InstanceId']
-        log.error(msg)
-        msg = "You must terminate all worker and manager servers before you can create a new manager."
-        log.error(msg)
-        sleep(0.1)  # sometimes log has problems if you don't give it a second, the error messages above are critical
-        raise Exception(msg)
+        log.info("Manager server %s already exists — continuing setup on existing instance."
+                 % manager_info['InstanceId'])
+        return manager_info
     
     rabbit_mq_sec_grp_id = get_or_create_rabbit_mq_security_group(eb_environment_name)['GroupId']
     instance_sec_grp_id = get_rds_security_groups_by_eb_name(eb_environment_name)["instance_sec_grp"]['GroupId']

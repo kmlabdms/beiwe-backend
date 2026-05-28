@@ -100,10 +100,6 @@ def get_base_eb_configuration():
             'Value': '360'
         }, {
             'Namespace': 'aws:autoscaling:asg',
-            'OptionName': 'Custom Availability Zones',
-            'Value': ''
-        }, {
-            'Namespace': 'aws:autoscaling:asg',
             'OptionName': 'MaxSize',
             'Value': '2'
         }, {

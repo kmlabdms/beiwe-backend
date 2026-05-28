@@ -85,8 +85,12 @@ def create_sec_grp_rule_parameters_allowing_traffic_from_another_security_group(
 
 def open_tcp_port(sec_grp_id, port, ip_address="0.0.0.0/0"):
     port = int(port)
-    create_ec2_client().authorize_security_group_ingress(
-            GroupId=sec_grp_id, IpProtocol="tcp", CidrIp=ip_address, FromPort=port, ToPort=port)
+    try:
+        create_ec2_client().authorize_security_group_ingress(
+                GroupId=sec_grp_id, IpProtocol="tcp", CidrIp=ip_address, FromPort=port, ToPort=port)
+    except Exception as e:
+        if 'InvalidPermission.Duplicate' not in str(e):
+            raise
 
 
 def create_security_group(group_name, description,

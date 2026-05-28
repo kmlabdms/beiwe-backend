@@ -1,0 +1,10 @@
+{
+  "region": "us-east-1",
+  "env_name": "my-beiwe",
+  "admin_email": "beiwe-ops@mylab.edu",
+  "domain": "beiwe.mylab.edu",
+  "sentry_eb_dsn": "https://XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX@sentry.io/0",
+  "sentry_dp_dsn": "https://XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX@sentry.io/0",
+  "sentry_js_dsn": "https://XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX@sentry.io/0",
+  "create_worker": false
+}

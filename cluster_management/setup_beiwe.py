@@ -232,16 +232,32 @@ def write_aws_profile(
 
 def run_launch_script(arg: str, env_name: str) -> None:
     """
-    Run launch_script.py, feeding env_name to its interactive stdin prompt.
-    All commands take exactly one environment name as their only interactive
-    input, so a single newline-terminated string covers all cases.
+    Run launch_script.py with the environment name.
+
+    Commands that do SSH (create-manager, create-worker) receive the env name
+    via the BEIWE_ENV_NAME environment variable so that the subprocess's stdin
+    remains connected to the real terminal — Fabric needs TTY access for its
+    SSH keep-alive and any auth fallbacks.
+
+    All other commands receive the env name piped to stdin.
     """
-    subprocess.run(
-        [sys.executable, str(LAUNCH_SCRIPT), arg],
-        cwd=str(CLUSTER_MANAGEMENT_DIR),
-        input=(env_name + "\n").encode(),
-        check=True,
-    )
+    _SSH_COMMANDS = {"-create-manager", "-create-worker",
+                     "-terminate-processing-servers",
+                     "-get-manager-ip", "-get-worker-ips"}
+    if arg in _SSH_COMMANDS:
+        subprocess.run(
+            [sys.executable, str(LAUNCH_SCRIPT), arg],
+            cwd=str(CLUSTER_MANAGEMENT_DIR),
+            env={**os.environ, "BEIWE_ENV_NAME": env_name},
+            check=True,
+        )
+    else:
+        subprocess.run(
+            [sys.executable, str(LAUNCH_SCRIPT), arg],
+            cwd=str(CLUSTER_MANAGEMENT_DIR),
+            input=(env_name + "\n").encode(),
+            check=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -345,50 +361,75 @@ def get_classic_lb_dns(region: str, lb_name: str) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def load_config_file(path: Path) -> dict:
+    if path.exists():
+        config = json.loads(path.read_text())
+        print(f"  Loaded configuration from {path.relative_to(CLUSTER_MANAGEMENT_DIR)}")
+        return config
+    return {}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Beiwe cluster deployment orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
-            All options can be supplied interactively if omitted.
-            The script is designed for a fresh deployment. Re-running a
-            partial deployment is supported via --skip-cdk and by answering
-            the environment-name prompt with the same name as before.
+            Values are resolved in this order: CLI flag > config file > interactive prompt.
+
+            Copy general_configuration/setup_config.example.json to
+            general_configuration/setup_config.json and fill it in to avoid
+            being prompted on every run.
         """),
     )
+    parser.add_argument("--config",
+                        help="Path to JSON config file "
+                             "(default: general_configuration/setup_config.json)")
     parser.add_argument("--region", help="AWS region (e.g. us-east-2)")
     parser.add_argument("--env-name", help="EB environment name (4–40 chars, letters/numbers/hyphens)")
     parser.add_argument("--admin-email", help="Email for AWS operational alerts")
     parser.add_argument("--domain", help="Beiwe domain (e.g. beiwe.mylab.edu)")
-    parser.add_argument("--sentry-eb-dsn", default=DUMMY_DSN, help="Sentry DSN for Elastic Beanstalk errors")
-    parser.add_argument("--sentry-dp-dsn", default=DUMMY_DSN, help="Sentry DSN for data-processing errors")
-    parser.add_argument("--sentry-js-dsn", default=DUMMY_DSN, help="Sentry public DSN for JavaScript errors")
+    parser.add_argument("--sentry-eb-dsn", default=None, help="Sentry DSN for Elastic Beanstalk errors")
+    parser.add_argument("--sentry-dp-dsn", default=None, help="Sentry DSN for data-processing errors")
+    parser.add_argument("--sentry-js-dsn", default=None, help="Sentry public DSN for JavaScript errors")
     parser.add_argument("--create-worker", action="store_true", help="Also create a worker server")
     parser.add_argument("--skip-cdk", action="store_true",
                         help="Skip cdk deploy (BeiwePrerequisitesStack already deployed)")
     args = parser.parse_args()
 
-    # ── Gather required inputs ──────────────────────────────────────────────
-    region = args.region or ask("AWS region (e.g. us-east-2)")
-    env_name = args.env_name or ask("EB environment name (4–40 chars, letters/numbers/hyphens)")
-    admin_email = args.admin_email or ask("Administrator email for AWS alerts")
-    domain = args.domain or ask("Beiwe domain name (e.g. beiwe.mylab.edu)")
+    # Load config file; CLI flags take precedence over file values
+    config_path = Path(args.config) if args.config else GENERAL_CONFIG_DIR / "setup_config.json"
+    fc = load_config_file(config_path)
 
-    sentry_eb_dsn = args.sentry_eb_dsn
-    sentry_dp_dsn = args.sentry_dp_dsn
-    sentry_js_dsn = args.sentry_js_dsn
-    if sentry_eb_dsn == DUMMY_DSN:
+    def r(cli_value, key):
+        """Return cli_value if given, else the value from the config file, else None."""
+        return cli_value if cli_value is not None else fc.get(key)
+
+    # ── Gather required inputs ──────────────────────────────────────────────
+    region = r(args.region, "region") or ask("AWS region (e.g. us-east-2)")
+    env_name = r(args.env_name, "env_name") or ask("EB environment name (4–40 chars, letters/numbers/hyphens)")
+    admin_email = r(args.admin_email, "admin_email") or ask("Administrator email for AWS alerts")
+    domain = r(args.domain, "domain") or ask("Beiwe domain name (e.g. beiwe.mylab.edu)")
+
+    sentry_eb_dsn = r(args.sentry_eb_dsn, "sentry_eb_dsn")
+    sentry_dp_dsn = r(args.sentry_dp_dsn, "sentry_dp_dsn")
+    sentry_js_dsn = r(args.sentry_js_dsn, "sentry_js_dsn")
+    if sentry_eb_dsn is None:
         print("\nSentry DSNs are optional but strongly recommended for error monitoring.")
         print("Press Enter to use placeholder values (can be updated later).")
         sentry_eb_dsn = ask("Sentry EB/data-processing DSN", default=DUMMY_DSN)
         sentry_dp_dsn = ask("Sentry data-processing DSN", default=sentry_eb_dsn)
         sentry_js_dsn = ask("Sentry JavaScript (public) DSN", default=sentry_eb_dsn)
+    else:
+        sentry_dp_dsn = sentry_dp_dsn or sentry_eb_dsn
+        sentry_js_dsn = sentry_js_dsn or sentry_eb_dsn
 
-    if not args.create_worker:
+    if args.create_worker:
+        create_worker = True
+    elif "create_worker" in fc:
+        create_worker = bool(fc["create_worker"])
+    else:
         ans = ask("\nCreate a worker server? (y/N)", default="N").lower()
         create_worker = ans in ("y", "yes")
-    else:
-        create_worker = True
 
     total = 12 + (1 if create_worker else 0)
     step = 0
@@ -420,10 +461,10 @@ def main() -> None:
     # ── 3. Download private key ─────────────────────────────────────────────
     next_step("Download EC2 private key from SSM Parameter Store")
     key_path = Path.home() / ".ssh" / f"{key_name}.pem"
-    if key_path.exists():
-        print(f"  {key_path} already exists, skipping download.")
-    else:
-        download_private_key(region, key_pair_id, key_path)
+    # Always re-download so the local file stays in sync with the current CDK stack's
+    # key pair. Skipping on "already exists" causes a stale-key mismatch if the stack
+    # has been redeployed since the file was first written.
+    download_private_key(region, key_pair_id, key_path)
 
     # ── 4. Write config files ───────────────────────────────────────────────
     next_step("Write aws_credentials.json and global_configuration.json")
