@@ -57,6 +57,29 @@ def state_file(env_name: str) -> Path:
     return ENV_CONFIG_DIR / f"{env_name}_suspend_state.json"
 
 
+def ssm_state_key(env_name: str) -> str:
+    return f"/beiwe/{env_name}/suspend_state"
+
+
+def load_suspend_state(region: str, env_name: str) -> dict | None:
+    """Read suspend state from the local file, falling back to SSM.
+
+    The local file is written by `pause` when run manually.
+    SSM is written by the scheduled Lambda — so resume still works
+    the morning after an automated overnight pause.
+    """
+    sf = state_file(env_name)
+    if sf.exists():
+        return json.loads(sf.read_text())
+    try:
+        ssm = boto3.client("ssm", region_name=region)
+        value = ssm.get_parameter(Name=ssm_state_key(env_name))["Parameter"]["Value"]
+        print(f"  (loaded suspend state from SSM — Lambda ran the pause)")
+        return json.loads(value)
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # EB / ASG
 # ---------------------------------------------------------------------------
@@ -223,10 +246,9 @@ def do_resume(region: str, env_name: str) -> None:
     else:
         print("  No processing servers found.")
 
-    # 3. EB ASG — restore saved settings
-    sf = state_file(env_name)
-    if sf.exists():
-        saved = json.loads(sf.read_text())
+    # 3. EB ASG — restore saved settings (local file first, SSM fallback)
+    saved = load_suspend_state(region, env_name)
+    if saved:
         asg_name = saved["asg_name"]
         min_size = saved.get("MinSize", 1)
         max_size = saved.get("MaxSize", 4)
