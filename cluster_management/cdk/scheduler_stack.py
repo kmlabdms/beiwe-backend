@@ -3,10 +3,11 @@ from aws_cdk import (
     CfnOutput,
     Duration,
     Stack,
-    aws_events as events,
-    aws_events_targets as targets,
+    TimeZone,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_scheduler as scheduler,
+    aws_scheduler_targets as scheduler_targets,
 )
 from constructs import Construct
 
@@ -87,7 +88,9 @@ class BeiweSchedulerStack(Stack):
 
     Note on DST: 01:00 UTC = 7 pm CST (UTC-6, Nov-Mar) / 8 pm CDT (UTC-5, Mar-Nov).
     To target a consistent local time through DST, deploy two EventBridge rules
-    with different cron expressions and toggle them manually at clock changes.
+    Uses EventBridge Scheduler (not the older EventBridge Rules) so the cron
+    expression runs in America/Chicago time and automatically adjusts for DST —
+    no manual rule-toggling needed at clock changes.
 
     ASG state is saved to SSM Parameter Store at /beiwe/{env}/suspend_state so
     that `manage_beiwe.py resume` can read it back even when the Lambda ran the pause.
@@ -131,14 +134,22 @@ class BeiweSchedulerStack(Stack):
             )
         )
 
-        # Daily at 01:00 UTC = 7 pm CST
-        rule = events.Rule(
+        # EventBridge Scheduler with America/Chicago timezone — fires at exactly
+        # 7 pm Central every day and handles DST automatically.
+        schedule = scheduler.Schedule(
             self,
             "DailyPause",
-            schedule=events.Schedule.cron(hour="1", minute="0"),
-            description=f"Pause Beiwe cost drivers for {env_name} daily at 7 pm CST",
+            schedule=scheduler.ScheduleExpression.cron(
+                hour="19",
+                minute="0",
+                time_zone=TimeZone.AMERICA_CHICAGO,
+            ),
+            target=scheduler_targets.LambdaInvoke(
+                pause_fn,
+                retry_attempts=1,
+            ),
+            description=f"Pause Beiwe cost drivers for {env_name} daily at 7 pm Central",
         )
-        rule.add_target(targets.LambdaFunction(pause_fn))
 
         CfnOutput(self, "PauseFunctionArn", value=pause_fn.function_arn)
-        CfnOutput(self, "EventRuleArn",     value=rule.rule_arn)
+        CfnOutput(self, "ScheduleArn",      value=schedule.schedule_arn)
