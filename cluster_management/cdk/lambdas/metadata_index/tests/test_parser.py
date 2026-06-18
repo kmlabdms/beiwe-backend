@@ -78,6 +78,7 @@ def test_duplicate_suffix_stripped_for_timestamp():
     assert isinstance(rec, p.MetadataRecord)
     assert rec.stream == "accelerometer"
     assert rec.device_time == 1779996316
+    assert rec.key == key  # original key retained (dedupe gate separates variants)
 
 
 # --- timestamp tolerance -----------------------------------------------------
@@ -166,3 +167,31 @@ def test_url_encoded_key_decodes_before_parsing():
     assert isinstance(rec, p.MetadataRecord)
     assert rec.stream == "accelerometer"
     assert rec.study == STUDY
+
+
+# --- robustness fixes from code review --------------------------------------
+
+def test_patient_id_equal_to_stream_token_does_not_misclassify():
+    # patient_id "gps" is a valid id ([1-9a-z]) AND a stream token. The real
+    # stream (accel) is at segment[2]; scanning only segments[2:] must not let
+    # the patient slot win. (The production parser scans the whole path and would
+    # misclassify here — we deliberately don't inherit that.)
+    key = f"{STUDY}/gps/accel/1779996316436.csv.zst"
+    rec = _parse(key)
+    assert isinstance(rec, p.MetadataRecord)
+    assert rec.patient == "gps"
+    assert rec.stream == "accelerometer"  # NOT "gps"
+
+
+def test_missing_upload_time_is_malformed():
+    rec = p.parse(key=f"{STUDY}/{PATIENT}/gps/1779996316436.csv.zst", size=10, upload_time="")
+    assert isinstance(rec, p.Malformed)
+    assert rec.reason == "missing_upload_time"
+
+
+def test_identifiers_substring_fallback():
+    # 'identifiers' appears as a substring of a segment, not an exact token.
+    key = f"{STUDY}/{PATIENT}/identifiersData/1779996316436.csv.zst"
+    rec = _parse(key)
+    assert isinstance(rec, p.MetadataRecord)
+    assert rec.stream == "identifiers"

@@ -134,6 +134,10 @@ class MetadataIndexStack(Stack):
                 "TABLE_NAME": table.table_name,
                 "TTL_DAYS": str(ttl_days),
                 "METRIC_NAMESPACE": metric_namespace,
+                # Set to a falsy value to stop writing the study-level daily
+                # rollup (derive study totals by query-time aggregation instead)
+                # if the STUDY#<study> partition's write rate becomes a problem.
+                "WRITE_STUDY_ROLLUP": "true",
             },
         )
         # Write-only on the table (the handler never reads). No s3 grant at all —
@@ -162,3 +166,6 @@ class MetadataIndexStack(Stack):
         CfnOutput(self, "QueueUrl", value=queue.queue_url)
         CfnOutput(self, "DlqUrl", value=dlq.queue_url)
         CfnOutput(self, "WriterFunctionName", value=writer_fn.function_name)
+        # Physical rule name so the disable runbook can target it directly
+        # (`aws events disable-rule --name <this>`).
+        CfnOutput(self, "EventBridgeRuleName", value=rule.rule_name)

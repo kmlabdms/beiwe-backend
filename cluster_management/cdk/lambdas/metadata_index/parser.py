@@ -65,23 +65,25 @@ class Malformed:
 ParsedOutcome = Union[MetadataRecord, Ignore, Malformed]
 
 
-def _resolve_stream(path: str) -> Optional[str]:
+def _resolve_stream(path: str, segments: list) -> Optional[str]:
     """Return the canonical stream for a key path, or None if unrecognized.
 
-    Mirrors s3_file_path_to_data_type: substring special-cases first (the tokens
-    that contain slashes / appear as infixes), then a segment scan, then the
-    identifiers fallback.
+    Mirrors s3_file_path_to_data_type's substring special-cases and identifiers
+    fallback, but scans only ``segments[2:]`` for the stream token -- i.e. the
+    path AFTER study (segments[0]) and patient (segments[1]). This avoids
+    misclassifying a participant whose patient_id happens to equal a stream token
+    (e.g. patient_id "gps"/"gyro"/"wifi"); the production parser scans the whole
+    path and is vulnerable to that collision, which we deliberately do not inherit.
     """
     # Substring special-cases -- these tokens are not clean single segments.
     if "/keys/" in path:
         return "key_file"
     if "ios/log" in path:
         return IOS_LOG_FILE
-    segments = path.split("/")
-    if "forest" in segments:
+    if "forest" in segments[2:]:
         return "forest"
-    # Scan each path segment against the known-token map.
-    for piece in segments:
+    # Scan only the segments after study + patient against the known-token map.
+    for piece in segments[2:]:
         data_type = DATA_STREAM_NAME_MAPPING.get(piece)
         if data_type:
             return data_type
@@ -137,7 +139,7 @@ def parse(key: str, size: int, upload_time: str, bucket: Optional[str] = None) -
         # than "unknown_stream" (key files are 3 segments and still reach Ignore).
         return Malformed(reason="too_few_segments")
 
-    stream = _resolve_stream(work)
+    stream = _resolve_stream(work, segments)
     if stream is None:
         return Malformed(reason="unknown_stream")
     if stream in NON_UPLOAD_STREAMS:
@@ -148,6 +150,12 @@ def parse(key: str, size: int, upload_time: str, bucket: Optional[str] = None) -
         return Malformed(reason="bad_study_id")
     if not _PATIENT_RE.match(patient):
         return Malformed(reason="bad_patient_id")
+
+    # upload_time is the load-bearing "last upload" basis and the rollup day key.
+    # A missing/empty event time would silently produce a bogus "DAY#" bucket and
+    # an empty last_upload_time, so reject it rather than writing garbage.
+    if not upload_time:
+        return Malformed(reason="missing_upload_time")
 
     device_time = _parse_device_time(segments[-1])
     return MetadataRecord(

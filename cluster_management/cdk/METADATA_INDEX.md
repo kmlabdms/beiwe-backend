@@ -43,19 +43,41 @@ This enables EventBridge notifications on the (existing, unmanaged) raw bucket v
 CDK's managed `Custom::S3BucketNotifications` resource — it **merges** with any
 existing notification config rather than overwriting it.
 
+## Stack outputs
+
+Resolve the physical names CloudFormation generated (the commands below reference these):
+
+```bash
+aws cloudformation describe-stacks --stack-name MetadataIndexStack \
+  --query "Stacks[0].Outputs" --output table
+# Keys: TableName, TableArn, ReaderRoleArn, QueueUrl, DlqUrl,
+#       WriterFunctionName, EventBridgeRuleName
+```
+
 ## Smoke check (post-deploy)
 
 1. Copy a tiny object to a raw-shaped, throwaway prefix:
    `aws s3 cp /tmp/x.zst s3://<bucket>/<study24>/zzsmoke01/gps/<unixms>.csv.zst`
-2. Confirm a message flowed through the queue and a DynamoDB item appeared
-   (`OBJ#…/zzsmoke01/…` and a `STUDY#…/LATEST#P#zzsmoke01` pointer).
+2. Confirm a message flowed through the queue and a DynamoDB item appeared:
+   ```bash
+   TABLE=$(aws cloudformation describe-stacks --stack-name MetadataIndexStack \
+     --query "Stacks[0].Outputs[?OutputKey=='TableName'].OutputValue" --output text)
+   aws dynamodb query --table-name "$TABLE" \
+     --key-condition-expression "PK = :pk AND begins_with(SK, :sk)" \
+     --expression-attribute-values '{":pk":{"S":"STUDY#<study24>"},":sk":{"S":"LATEST#P#zzsmoke01"}}'
+   ```
 3. Delete the test object. (It is a throwaway patient id, not real data.)
 
 ## Disable vs. teardown (both leave the bucket and Beiwe untouched)
 
-- **Disable (keep the data):** disable or delete the EventBridge rule
-  (`ObjectCreatedRule`). Ingestion stops immediately; the table is preserved for
-  queries.
+- **Disable (keep the data):** disable the EventBridge rule by its physical name
+  (from the `EventBridgeRuleName` output). Ingestion stops immediately; the table
+  is preserved for queries.
+  ```bash
+  RULE=$(aws cloudformation describe-stacks --stack-name MetadataIndexStack \
+    --query "Stacks[0].Outputs[?OutputKey=='EventBridgeRuleName'].OutputValue" --output text)
+  aws events disable-rule --name "$RULE"   # re-enable with: aws events enable-rule --name "$RULE"
+  ```
 - **Teardown:** `cdk destroy MetadataIndexStack`. The managed bucket-notification
   resource reverts the EventBridge flag on the bucket. The DynamoDB table is
   `RemovalPolicy.RETAIN`, so it survives `destroy` — delete it explicitly if a
@@ -71,15 +93,30 @@ policy. Latest-pointers and rollups carry `patient_id`/`study_object_id`
 indefinitely (only the `OBJ#` dedupe records have a TTL), so participant deletion
 is a deliberate procedure, not something TTL satisfies. To erase a participant:
 
-1. Delete the latest pointers: `STUDY#<study>` items with SK `LATEST#P#<patient>`
-   and SK `begins_with LATEST#P#<patient>#S#`.
-2. Delete the per-stream daily rollups: items with PK
-   `begins_with STUDY#<study>#P#<patient>#S#`.
-3. Delete any remaining `OBJ#<key>` dedupe records for that patient (query/scan by
-   the `patient` attribute, or by key prefix `OBJ#<study>/<patient>/`).
-4. Confirm none remain. Note that **study-level** `DAY#` rollups are aggregates and
-   do not single out a participant; rebuild them from raw S3 if exact study totals
-   must exclude the erased participant.
+1. **Latest pointers** — Query `PK = STUDY#<study>`, `begins_with(SK, "LATEST#P#<patient>")`,
+   then `delete-item` each returned key (this returns both `LATEST#P#<patient>` and
+   `LATEST#P#<patient>#S#<stream>`):
+   ```bash
+   aws dynamodb query --table-name "$TABLE" \
+     --key-condition-expression "PK = :pk AND begins_with(SK, :sk)" \
+     --expression-attribute-values '{":pk":{"S":"STUDY#<study>"},":sk":{"S":"LATEST#P#<patient>"}}' \
+     --query "Items[].{PK:PK,SK:SK}" | \
+   jq -c '.[]' | while read k; do aws dynamodb delete-item --table-name "$TABLE" --key "$k"; done
+   ```
+2. **Per-stream daily rollups** — the PK encodes the patient, so for each stream the
+   participant used, delete `PK = STUDY#<study>#P#<patient>#S#<stream>` rows (Query that
+   PK, delete each `DAY#` item).
+3. **`OBJ#` dedupe records** — `patient` is a non-key attribute, so this requires a
+   **Scan with a FilterExpression** (`FilterExpression: patient = :p`), which needs the
+   admin/deploy credentials, **not** the read-only `MetadataIndexReaderRole`. Scan and
+   `delete-item` each match.
+4. Confirm none remain. Note that **study-level** `DAY#` rollups are aggregates and do
+   not single out a participant; rebuild them from raw S3 if exact study totals must
+   exclude the erased participant.
+
+> A `study_id` + `patient_id` erasure helper script (doing all three steps) is a
+> reasonable future addition so the procedure is equally runnable by a human, an agent,
+> or a CI job — deferred with the rest of the Phase 2 operational tooling.
 
 ## Reader access (Grafana and humans)
 

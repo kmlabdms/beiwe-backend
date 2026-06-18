@@ -203,3 +203,124 @@ def test_mixed_batch(table):
     assert result["batchItemFailures"] == []
     accel = _stream_rollup(table, "accelerometer")
     assert int(accel["count"]) == 1  # valid counted once; duplicate not re-counted
+
+
+# --- code-review fixes: saga rollback, batch isolation, metrics, toggles -----
+
+def test_transient_rollup_failure_rolls_back_and_retry_recounts_once(table, monkeypatch):
+    """The cited P1: a transient failure between the dedupe marker and the rollups
+    must NOT leave a marker that suppresses the count on retry. The saga deletes
+    the marker so the retry re-counts exactly once."""
+    real_add = dynamo_writer._add_rollup
+    calls = {"n": 0}
+
+    def flaky_add(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:  # fail the very first rollup ADD
+            raise ClientError({"Error": {"Code": "ProvisionedThroughputExceededException"}}, "UpdateItem")
+        return real_add(*args, **kwargs)
+
+    monkeypatch.setattr(dynamo_writer, "_add_rollup", flaky_add)
+    key = _raw_key("gps", 1779996330000)
+    r1 = handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)
+    assert r1["batchItemFailures"] == [{"itemIdentifier": "m1"}]   # returned for retry
+    assert _item(table, f"OBJ#{key}", "OBJ") is None               # marker rolled back
+    assert _stream_rollup(table, "gps") is None                    # no rollup applied
+
+    r2 = handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)  # SQS retry
+    assert r2["batchItemFailures"] == []
+    assert int(_stream_rollup(table, "gps")["count"]) == 1         # counted exactly once
+
+
+def test_split_brain_avoided_when_second_rollup_fails(table, monkeypatch):
+    """If the study rollup fails after the per-stream rollup applied, the applied
+    one is compensated and the marker removed, so the retry leaves the per-stream
+    and study rollups consistent (both == 1), never split-brained."""
+    real_add = dynamo_writer._add_rollup
+    calls = {"n": 0}
+
+    def flaky_add(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:  # fail the SECOND rollup (study) on first delivery
+            raise ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
+        return real_add(*args, **kwargs)
+
+    monkeypatch.setattr(dynamo_writer, "_add_rollup", flaky_add)
+    key = _raw_key("gps", 1779996330000)
+    handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)   # fails + compensates
+    handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)   # retry succeeds
+    stream = _stream_rollup(table, "gps")
+    study = _item(table, f"STUDY#{STUDY}", f"DAY#{DAY}")
+    assert int(stream["count"]) == 1 and int(stream["bytes"]) == 50
+    assert int(study["count"]) == 1 and int(study["bytes"]) == 50   # consistent, not 2-vs-1
+
+
+def test_non_clienterror_isolated_to_its_message(table, monkeypatch):
+    real_parse = handler.parser.parse
+
+    def maybe_boom(**kwargs):
+        if "boom" in kwargs["key"]:
+            raise ValueError("kaboom")  # a non-ClientError
+        return real_parse(**kwargs)
+
+    monkeypatch.setattr(handler.parser, "parse", maybe_boom)
+    event = _sqs_event(
+        _eb_message(_raw_key("gps", 1779996330000), 50, "good"),
+        _eb_message(f"{STUDY}/{PATIENT}/gps/boom.csv.zst", 10, "poison"),
+    )
+    result = handler.handler(event, None)
+    assert result["batchItemFailures"] == [{"itemIdentifier": "poison"}]  # only the poison
+    assert int(_stream_rollup(table, "gps")["count"]) == 1                # healthy one written
+
+
+def test_missing_object_key_does_not_write_or_fail(table):
+    body = {  # EventBridge body whose object has no "key"
+        "detail-type": "Object Created", "source": "aws.s3", "time": f"{DAY}T20:00:00Z",
+        "detail": {"bucket": {"name": "b"}, "object": {"size": 10}},
+    }
+    result = handler.handler(_sqs_event({"messageId": "nokey", "body": json.dumps(body)}), None)
+    assert result["batchItemFailures"] == []
+    assert _item(table, f"STUDY#{STUDY}", f"DAY#{DAY}") is None
+
+
+def test_missing_event_time_is_malformed_no_writes(table):
+    body = {  # EventBridge body with NO "time" field
+        "detail-type": "Object Created", "source": "aws.s3",
+        "detail": {"bucket": {"name": "b"}, "object": {"key": _raw_key("gps", 1779996330000), "size": 10}},
+    }
+    result = handler.handler(_sqs_event({"messageId": "nt", "body": json.dumps(body)}), None)
+    assert result["batchItemFailures"] == []          # malformed, not retried
+    assert _stream_rollup(table, "gps") is None        # nothing written
+
+
+def test_metrics_emitted_when_namespace_set(table, monkeypatch):
+    captured = []
+
+    class FakeCloudWatch:
+        def put_metric_data(self, **kwargs):
+            captured.append(kwargs)
+
+    monkeypatch.setenv("METRIC_NAMESPACE", "BeiweUploadMetadata")
+    monkeypatch.setattr(handler, "_CLOUDWATCH", FakeCloudWatch())
+    handler.handler(_sqs_event(_eb_message(_raw_key("gps", 1779996330000), 10, "m")), None)
+    assert captured and captured[0]["Namespace"] == "BeiweUploadMetadata"
+    assert "Written" in {m["MetricName"] for m in captured[0]["MetricData"]}
+
+
+def test_metric_emission_failure_does_not_break_processing(table, monkeypatch):
+    class BoomCloudWatch:
+        def put_metric_data(self, **kwargs):
+            raise RuntimeError("cloudwatch down")
+
+    monkeypatch.setenv("METRIC_NAMESPACE", "BeiweUploadMetadata")
+    monkeypatch.setattr(handler, "_CLOUDWATCH", BoomCloudWatch())
+    result = handler.handler(_sqs_event(_eb_message(_raw_key("gps", 1779996330000), 10, "m")), None)
+    assert result["batchItemFailures"] == []                       # metrics are best-effort
+    assert int(_stream_rollup(table, "gps")["count"]) == 1         # write still happened
+
+
+def test_study_rollup_can_be_disabled(table, monkeypatch):
+    monkeypatch.setattr(dynamo_writer, "WRITE_STUDY_ROLLUP", False)
+    handler.handler(_sqs_event(_eb_message(_raw_key("gps", 1779996330000), 10, "m")), None)
+    assert _stream_rollup(table, "gps") is not None                # per-stream still written
+    assert _item(table, f"STUDY#{STUDY}", f"DAY#{DAY}") is None     # study rollup suppressed

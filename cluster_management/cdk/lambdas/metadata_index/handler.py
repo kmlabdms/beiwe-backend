@@ -25,7 +25,10 @@ import parser
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-_TABLE = None  # lazy singleton so moto's mock is active before the client is built
+# Lazy singletons so a warm container reuses clients and moto's mock is active
+# before the first client is built.
+_TABLE = None
+_CLOUDWATCH = None
 
 
 def _get_table():
@@ -33,6 +36,13 @@ def _get_table():
     if _TABLE is None:
         _TABLE = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
     return _TABLE
+
+
+def _get_cloudwatch():
+    global _CLOUDWATCH
+    if _CLOUDWATCH is None:
+        _CLOUDWATCH = boto3.client("cloudwatch")
+    return _CLOUDWATCH
 
 
 def _ttl_seconds() -> int:
@@ -71,7 +81,7 @@ def _emit_metrics(counts: dict) -> None:
     if not namespace or not counts:
         return
     try:
-        boto3.client("cloudwatch").put_metric_data(
+        _get_cloudwatch().put_metric_data(
             Namespace=namespace,
             MetricData=[{"MetricName": name, "Value": value, "Unit": "Count"}
                         for name, value in counts.items()],
@@ -120,6 +130,16 @@ def handler(event, context):
             # message for retry; the writes already applied are idempotent.
             counts["RetryableError"] += 1
             log.warning("retryable write failure: %s", exc.response.get("Error", {}).get("Code"))
+            if message_id:
+                failures.append(message_id)
+        except Exception:
+            # Any non-ClientError (parser regression, attribute error, etc.) must
+            # be isolated to THIS message -- letting it escape would crash the
+            # whole invocation and drag healthy messages in the batch to the DLQ.
+            # log.exception keeps the traceback; we never log the raw event body
+            # (it carries the PII-bearing key).
+            counts["UnexpectedError"] += 1
+            log.exception("unexpected error processing message %s", message_id)
             if message_id:
                 failures.append(message_id)
 
