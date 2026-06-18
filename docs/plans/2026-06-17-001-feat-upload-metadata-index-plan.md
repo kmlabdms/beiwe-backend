@@ -1,7 +1,7 @@
 ---
 title: "feat: Upload Metadata Index — event-driven S3 upload monitoring layer"
 type: feat
-status: active
+status: completed
 date: 2026-06-17
 ---
 
