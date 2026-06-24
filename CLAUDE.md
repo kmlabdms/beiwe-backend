@@ -107,3 +107,7 @@ python manage.py import_beiwe_data <object_id> /path/to/data
 Deployment uses Elastic Beanstalk for web servers and a custom launch script (`cluster_management/launch_script.py`) for processing servers. The EB environment is named `kowalski-beiwe`, application `beiwe-application`, region `us-east-1`, profile `eb-cli`.
 
 Data processing servers are standalone EC2 Ubuntu instances, not part of the EB environment. They are managed via `cluster_management/manage_beiwe.py`.
+
+### Upload Metadata Index (additive, opt-in)
+
+`cluster_management/cdk/MetadataIndexStack` is an additive, event-driven layer that records lightweight metadata about each raw S3 upload (S3 → EventBridge → SQS → Lambda → DynamoDB) for upload-activity monitoring. It does **not** change the upload path, read/decrypt object contents, or touch Postgres; raw S3 stays the system of record. It is opt-in (`cdk deploy MetadataIndexStack -c enable_metadata_index=true`) and safe to disable (delete the EventBridge rule) or tear down (`cdk destroy`). Its Lambda tests run via the CDK venv with `pytest`+`moto`, **not** the Django test runner. See `cluster_management/cdk/METADATA_INDEX.md`.

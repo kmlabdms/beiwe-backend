@@ -76,3 +76,8 @@ bun.lock
 !**/test/**/pnpm-lock.yaml
 !**/test/**/bun.lockb
 !**/test/**/bun.lock
+
+# Python test venv for metadata_index lambda
+.venv/
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,9 @@
+{
+  "Records": [
+    {
+      "messageId": "m-accel",
+      "receiptHandle": "rh-m-accel",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/accel/1779996316436.csv.zst\", \"size\": 100}}}"
+    }
+  ]
+}

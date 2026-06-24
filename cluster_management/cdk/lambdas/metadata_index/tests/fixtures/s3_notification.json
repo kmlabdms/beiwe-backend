@@ -1,0 +1,9 @@
+{
+  "Records": [
+    {
+      "messageId": "m-s3",
+      "receiptHandle": "rh-m-s3",
+      "body": "{\"Records\": [{\"eventTime\": \"2026-05-28T20:00:00Z\", \"eventName\": \"ObjectCreated:Put\", \"s3\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/gps/1779996330000.csv.zst\", \"size\": 77}}}]}"
+    }
+  ]
+}

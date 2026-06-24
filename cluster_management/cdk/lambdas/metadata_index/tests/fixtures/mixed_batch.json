@@ -1,0 +1,44 @@
+{
+  "Records": [
+    {
+      "messageId": "valid-accel",
+      "receiptHandle": "rh-valid-accel",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/accel/1779996316436.csv.zst\", \"size\": 100}}}"
+    },
+    {
+      "messageId": "survey-5seg",
+      "receiptHandle": "rh-survey-5seg",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/surveyTimings/sUrVeY1234567890AbCdEf12/1779996320000.csv.zst\", \"size\": 50}}}"
+    },
+    {
+      "messageId": "ios-log-slash",
+      "receiptHandle": "rh-ios-log-slash",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/ios/log/1779996330000.csv.zst\", \"size\": 10}}}"
+    },
+    {
+      "messageId": "audio-mp4",
+      "receiptHandle": "rh-audio-mp4",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/voiceRecording/1779996340000.mp4.zst\", \"size\": 200}}}"
+    },
+    {
+      "messageId": "dup-accel",
+      "receiptHandle": "rh-dup-accel",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/accel/1779996316436.csv.zst\", \"size\": 100}}}"
+    },
+    {
+      "messageId": "ignore-chunk",
+      "receiptHandle": "rh-ignore-chunk",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"CHUNKED_DATA/2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/gps/x.csv.zst\", \"size\": 999}}}"
+    },
+    {
+      "messageId": "ignore-keys",
+      "receiptHandle": "rh-ignore-keys",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/keys/7xhpe54h_private.zst\", \"size\": 999}}}"
+    },
+    {
+      "messageId": "malformed",
+      "receiptHandle": "rh-malformed",
+      "body": "{\"detail-type\": \"Object Created\", \"source\": \"aws.s3\", \"time\": \"2026-05-28T20:00:00Z\", \"detail\": {\"bucket\": {\"name\": \"beiwe-data-kowalski-beiwe-example\"}, \"object\": {\"key\": \"2grtzwKjSxi64uYkxqZASgxe/7xhpe54h/notarealstream/1.csv.zst\", \"size\": 5}}}"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# Runtime dependencies for the metadata_index Lambda deployment bundle.
+#
+# boto3/botocore are provided by the AWS Lambda Python 3.12 runtime, and the
+# handler/parser otherwise use only the standard library, so the deployed asset
+# needs no third-party packages.
+#
+# Test-only dependencies (pytest, moto, aws-cdk-lib) live in the CDK dev
+# environment (cluster_management/cdk/.venv), not in this bundle.
