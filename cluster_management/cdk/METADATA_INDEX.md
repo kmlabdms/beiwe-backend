@@ -19,7 +19,8 @@ behind the `enable_metadata_index` context flag. Lambda code lives in
 |---|---|
 | Last upload per participant | `STUDY#<study>` / `LATEST#P#<patient>` |
 | Last upload per participant + stream | `STUDY#<study>` / `LATEST#P#<patient>#S#<stream>` |
-| Counts / bytes over time (per stream) | `STUDY#<study>#P#<patient>#S#<stream>` / `DAY#<YYYY-MM-DD>` |
+| Counts / bytes over time (per participant + stream) | `STUDY#<study>#P#<patient>#S#<stream>` / `DAY#<YYYY-MM-DD>` |
+| Counts / bytes over time (per stream, whole study) | `STUDY#<study>#S#<stream>` / `DAY#<YYYY-MM-DD>` |
 | Study-level volume trend | `STUDY#<study>` / `DAY#<YYYY-MM-DD>` |
 | Stale-stream detection | query `STUDY#<study>`, `begins_with LATEST#P#`, filter `last_upload_time < threshold` |
 | Idempotency / per-object log | `OBJ#<key>` / `OBJ` (TTL'd) |
@@ -28,6 +29,19 @@ behind the `enable_metadata_index` context flag. Lambda code lives in
 > streams **expected but never uploaded** needs Beiwe's expected-stream config and
 > is deferred (Phase 2). Grafana dashboards are a downstream consumer (Phase 2);
 > this layer only collects the data and exposes a `begins_with`-friendly schema.
+
+### Study-level per-stream rollup (`STUDY#<study>#S#<stream>` / `DAY#`)
+
+The writer keeps a study-level per-stream daily rollup **in addition to** the
+participant-scoped one. It exists so per-stream study totals/trends are a bounded
+read — one `Query` per stream (≤ ~20), independent of participant count — for the
+in-app per-study dashboard, instead of a per-(participant,stream) fan-out. It is
+always written (independent of `WRITE_STUDY_ROLLUP`) and lives in its own
+partition, so it adds no load to the `STUDY#<study>` partition. It is a study-level
+**aggregate**: like the `STUDY#<study>` / `DAY#` rollup it cannot single out a
+participant (see participant-erasure note below). The scan-based `show_metadata_index.py`
+deliberately ignores these items (it already derives per-stream totals from the
+participant-scoped rollups).
 
 ## Deploy (opt-in)
 
@@ -110,8 +124,9 @@ is a deliberate procedure, not something TTL satisfies. To erase a participant:
    **Scan with a FilterExpression** (`FilterExpression: patient = :p`), which needs the
    admin/deploy credentials, **not** the read-only `MetadataIndexReaderRole`. Scan and
    `delete-item` each match.
-4. Confirm none remain. Note that **study-level** `DAY#` rollups are aggregates and do
-   not single out a participant; rebuild them from raw S3 if exact study totals must
+4. Confirm none remain. Note that **study-level** aggregates — both `STUDY#<study>` /
+   `DAY#` and `STUDY#<study>#S#<stream>` / `DAY#` (the per-stream rollup) — do not
+   single out a participant; rebuild them from raw S3 if exact study totals must
    exclude the erased participant.
 
 > A `study_id` + `patient_id` erasure helper script (doing all three steps) is a
@@ -146,6 +161,27 @@ same key will **double-count**. Therefore:
 - The deferred backfill (Phase 2) must be a **full rebuild** (delete-then-
   repopulate) or run through the same per-object dedupe gate — never an additive
   merge over a live index.
+
+## Schema-change reset (ordered drain)
+
+When a writer change adds or alters a rollup shape (e.g. the study-level per-stream
+rollup) and the existing index data is disposable, repopulate cleanly with an
+**ordered drain** rather than a backfill — the drain prevents the reset from itself
+double-counting in-flight or dead-lettered events (which would otherwise re-pass the
+`attribute_not_exists` dedupe gate against a freshly-wiped table):
+
+1. **Stop ingestion:** `aws events disable-rule --name "$RULE"` (the `EventBridgeRuleName` output).
+2. **Drain the buffers:** wait for the main queue and DLQ to empty, or purge them —
+   `aws sqs purge-queue --queue-url "$QueueUrl"` and the same for `$DlqUrl`. This is
+   the load-bearing step: any message still queued/retryable when the table is wiped
+   would re-count.
+3. **Wipe:** delete all items (or delete + recreate the table).
+4. **Redeploy** the writer with the new rollup: `cdk deploy MetadataIndexStack -c enable_metadata_index=true`.
+5. **Resume ingestion:** `aws events enable-rule --name "$RULE"`.
+
+The index then repopulates from go-forward uploads (no historical backfill). Only run
+this against a **dev/disposable** table — confirm no consumer depends on the existing
+data first.
 
 ## Tests
 

@@ -138,7 +138,14 @@ def aggregate(items: list) -> dict:
             data["participants"][study].add(patient)
             tot = data["stream_totals"][(study, patient, stream)]
             tot["count"] += num(it.get("count")); tot["bytes"] += num(it.get("bytes"))
-        elif pk.startswith("STUDY#") and "#P#" not in pk and sk.startswith("DAY#"):
+        elif pk.startswith("STUDY#") and "#P#" not in pk and "#S#" in pk and sk.startswith("DAY#"):
+            # Study-level per-stream daily rollup (STUDY#<study>#S#<stream> / DAY#),
+            # the bounded-read source for the in-app dashboard. This scan-based tool
+            # already derives per-stream totals from the participant-scoped rollups
+            # above, so skip these to avoid inventing a bogus "<study>#S#<stream>"
+            # study name and double-counting study totals.
+            pass
+        elif pk.startswith("STUDY#") and "#P#" not in pk and "#S#" not in pk and sk.startswith("DAY#"):
             study = pk.split("#", 1)[1]
             data["studies"].add(study)
             data["study_daily"][study][sk[4:]] = {"count": num(it.get("count")), "bytes": num(it.get("bytes"))}
