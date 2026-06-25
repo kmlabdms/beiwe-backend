@@ -176,6 +176,33 @@ Then **app settings** — set `METADATA_INDEX_ENABLED=true`, `METADATA_INDEX_TAB
 (the `TableName` output), `METADATA_INDEX_REGION`, and `METADATA_INDEX_READER_ROLE_ARN`
 (the `ReaderRoleArn` output) in the web environment; keep `DEBUG=False`.
 
+### Scripted deploy (`make` / `deploy_metadata_index.sh`)
+
+`deploy_metadata_index.sh` automates the above; the repo-root `Makefile` wraps it.
+Mutating targets are **preview-only** unless you pass `APPLY=true` (or `EXECUTE=true`
+for the reset), so a bare run never changes anything.
+
+```bash
+make metadata-index-web-arn AWS_PROFILE=<p>     # resolve the runtime web principal ARN
+make metadata-index-outputs AWS_PROFILE=<p>     # show TableName / ReaderRoleArn / region
+make metadata-index-deploy  AWS_PROFILE=<p>             # PREVIEW: cdk deploy (scoped trust) + set web env
+make metadata-index-deploy  AWS_PROFILE=<p> APPLY=true  # actually deploy the stack + eb setenv
+make metadata-index-set-env AWS_PROFILE=<p> APPLY=true  # just (re)set the EB web env from stack outputs
+```
+
+`deploy` auto-derives `reader_principal_arn` (the principal that assumes the reader
+role) via `aws sts get-caller-identity` on the `BEIWE_SERVER_AWS_*` credentials, or
+from the EB env's access-key id; override with `READER_PRINCIPAL_ARN=...`. The web
+env vars are written with `eb setenv` (the EB env from `.elasticbeanstalk/config.yml`,
+overridable via `EB_ENV=...`).
+
+The destructive schema reset is deliberately separate and double-gated:
+
+```bash
+make metadata-index-reset AWS_PROFILE=<p>                                          # prints the plan
+make metadata-index-reset AWS_PROFILE=<p> EXECUTE=true I_UNDERSTAND_THIS_DELETES_DATA=yes   # runs it
+```
+
 **Verify before relying on the page** (run as the web principal):
 
 ```bash
