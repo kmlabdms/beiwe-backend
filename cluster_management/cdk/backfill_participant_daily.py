@@ -25,6 +25,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Import the writer's shard fn so backfilled items land in the SAME shard the live
 # writer uses (and reuse its SHARDS constant). Mirrors test_show_metadata_index.py's
@@ -99,7 +100,12 @@ def _assert_paused(session, region, outputs):
 
 
 def _write(table, daily, first):
-    """SET (absolute) the derived items + ensure CONFIG/SHARDS. put_item overwrites."""
+    """Write the derived items + ensure CONFIG/SHARDS (ingestion must be paused).
+
+    Participant-daily uses an absolute put -- the derived per-day sum IS the truth.
+    FIRST# uses a conditional keep-minimum update (not put), so it can never REGRESS
+    an already-earlier first_day (e.g. if rollups were ever pruned) and preserves any
+    other attributes -- mirroring the live writer's _advance_first_pointer."""
     with table.batch_writer() as batch:
         for (study, patient, day), agg in daily.items():
             batch.put_item(Item={
@@ -107,10 +113,17 @@ def _write(table, daily, first):
                 "SK": f"P#{patient}#DAY#{day}",
                 "count": agg["count"], "bytes": agg["bytes"],
             })
-        for (study, patient), fd in first.items():
-            batch.put_item(Item={
-                "PK": f"STUDY#{study}", "SK": f"FIRST#P#{patient}", "first_day": fd,
-            })
+    for (study, patient), fd in first.items():
+        try:
+            table.update_item(
+                Key={"PK": f"STUDY#{study}", "SK": f"FIRST#P#{patient}"},
+                UpdateExpression="SET first_day = :d",
+                ConditionExpression="attribute_not_exists(first_day) OR first_day > :d",
+                ExpressionAttributeValues={":d": fd},
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise  # a stored first_day is already earlier -- expected, not an error
     table.put_item(Item={"PK": "CONFIG", "SK": "SHARDS", "value": SHARDS})
 
 
@@ -129,12 +142,20 @@ def main(argv=None):
     outputs = _stack_outputs(session, args.region, args.stack)
     table = session.resource("dynamodb", region_name=args.region).Table(args.table or outputs["TableName"])
 
-    daily, first = aggregate_rollups(_scan(table), set(args.study) if args.study else None)
+    study_filter = set(args.study) if args.study else None
+    if args.apply:
+        # Verify ingestion is paused BEFORE scanning, so the scan can't read a live,
+        # still-mutating table (a SET racing the writer's ADD would corrupt counts).
+        _assert_paused(session, args.region, outputs)
+
+    daily, first = aggregate_rollups(_scan(table), study_filter)
     print(f"derived {len(daily)} participant-day cells across {len(first)} participants (SHARDS={SHARDS})")
+    if study_filter and not daily:
+        print(f"WARNING: --study {sorted(study_filter)} matched no rollups -- nothing to write "
+              "(check the object_id; this is otherwise a silent no-op).")
     if not args.apply:
         print("(dry-run; pass --apply to write -- requires ingestion paused: rule DISABLED + queues drained)")
         return
-    _assert_paused(session, args.region, outputs)
     _write(table, daily, first)
     print("backfill complete.")
 

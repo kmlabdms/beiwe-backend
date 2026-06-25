@@ -298,13 +298,15 @@ def test_participant_daily_rollup_failure_compensates_and_recounts_once(table, m
     """The participant-daily aggregate is the LAST target; faulting it must compensate
     all earlier targets and un-claim, so the retry recounts every rollup exactly once."""
     real_add = dynamo_writer._add_rollup
-    calls = {"n": 0}
+    state = {"failed": False}
 
-    def flaky_add(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 4:  # fail the LAST ADD (participant-daily) on first delivery
+    def flaky_add(table_, pk, sk, *a, **k):
+        # Fail the participant-daily ADD (its SK starts with "P#") exactly once, on the
+        # first delivery -- robust to target count/order and WRITE_STUDY_ROLLUP.
+        if sk.startswith("P#") and not state["failed"]:
+            state["failed"] = True
             raise ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
-        return real_add(*args, **kwargs)
+        return real_add(table_, pk, sk, *a, **k)
 
     monkeypatch.setattr(dynamo_writer, "_add_rollup", flaky_add)
     key = _raw_key("gps", 1779996330000)

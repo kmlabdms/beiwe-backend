@@ -77,13 +77,13 @@ metadata-index-outputs:
 	$(METADATA_INDEX_SCRIPT) outputs
 
 metadata-index-set-env:
-	$(METADATA_INDEX_SCRIPT) set-env $(if $(APPLY),--apply,)
+	$(METADATA_INDEX_SCRIPT) set-env $(if $(filter true,$(APPLY)),--apply,)
 
 metadata-index-deploy:
-	$(METADATA_INDEX_SCRIPT) deploy $(if $(APPLY),--apply,)
+	$(METADATA_INDEX_SCRIPT) deploy $(if $(filter true,$(APPLY)),--apply,)
 
 metadata-index-backfill:
-	$(METADATA_INDEX_SCRIPT) backfill $(if $(APPLY),--apply,)
+	$(METADATA_INDEX_SCRIPT) backfill $(if $(filter true,$(APPLY)),--apply,)
 
 metadata-index-reset:
-	$(METADATA_INDEX_SCRIPT) reset $(if $(EXECUTE),--execute,)
+	$(METADATA_INDEX_SCRIPT) reset $(if $(filter true,$(EXECUTE)),--execute,)
