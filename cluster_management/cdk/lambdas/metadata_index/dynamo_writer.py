@@ -33,6 +33,7 @@ any realistic replay horizon and keep backfill a full rebuild or dedupe-gated.
 from __future__ import annotations
 
 import os
+import zlib
 
 from botocore.exceptions import ClientError
 
@@ -47,6 +48,17 @@ WRITE_STUDY_ROLLUP = str(os.environ.get("WRITE_STUDY_ROLLUP", "true")).strip().l
 
 WRITTEN = "written"
 DUPLICATE = "duplicate"
+
+# Number of partitions the per-participant daily aggregate is sharded across (the
+# bounded-read source for the adherence heatmap / sparklines). LOAD-BEARING: the
+# reader (libs/metadata_index_reader.py, vendored copy) and the backfill must use
+# the SAME value and the SAME _shard_for; changing it requires a coordinated deploy
+# + re-backfill. The value is persisted to a CONFIG item so the reader can assert
+# it matches and fail loudly on drift rather than silently dropping participants.
+SHARDS = 8
+
+# Ensure-once-per-container guard for the CONFIG/SHARDS item (avoids a write per upload).
+_config_ensured = False
 
 
 def _obj_pk(key: str) -> str:
@@ -70,6 +82,19 @@ def _study_stream_rollup_pk(study: str, stream: str) -> str:
     return f"STUDY#{study}#S#{stream}"
 
 
+def _shard_for(patient: str) -> int:
+    """Deterministic shard index for a patient. MUST be byte-for-byte identical in
+    the reader and backfill -- never use the builtin hash() (randomized per process)."""
+    return zlib.crc32(patient.encode()) % SHARDS
+
+
+def _participant_daily_pk(study: str, patient: str) -> str:
+    """Sharded per-participant daily aggregate partition. SK is P#<patient>#DAY#<day>,
+    so one Query per shard (begins_with P#) reassembles the whole participant x day
+    adherence matrix -- bounded by SHARDS, independent of participant count."""
+    return f"STUDY#{study}#DAILY#{_shard_for(patient)}"
+
+
 def _is_conditional_failure(exc: ClientError) -> bool:
     return exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
 
@@ -91,10 +116,13 @@ def _marker_item(record, now_epoch: int, ttl_seconds: int) -> dict:
     return item
 
 
-def _add_rollup(table, pk: str, day: str, count_delta: int, size_delta: int) -> None:
-    """ADD count/bytes deltas to a DAY# rollup (negative deltas compensate)."""
+def _add_rollup(table, pk: str, sk: str, count_delta: int, size_delta: int) -> None:
+    """ADD count/bytes deltas to a rollup item at (pk, sk) (negative deltas compensate).
+    The SK is passed explicitly because rollup targets no longer share one SK shape:
+    the count rollups use DAY#<day> while the participant-daily aggregate uses
+    P#<patient>#DAY#<day>."""
     table.update_item(
-        Key={"PK": pk, "SK": f"DAY#{day}"},
+        Key={"PK": pk, "SK": sk},
         UpdateExpression="ADD #c :c, #b :b",
         ExpressionAttributeNames={"#c": "count", "#b": "bytes"},
         ExpressionAttributeValues={":c": count_delta, ":b": size_delta},
@@ -128,6 +156,38 @@ def _advance_latest_pointer(table, pk: str, sk: str, record, include_stream: boo
         raise
 
 
+def _advance_first_pointer(table, pk: str, sk: str, day: str) -> None:
+    """Keep the EARLIEST upload day ever seen for a participant (the mirror of
+    _advance_latest_pointer). Day-granular on purpose: the per-stream rollups carry
+    no timestamp, so the backfill can only derive the minimum DAY#, and writer +
+    backfill must agree on the same field. ISO-date string compare == chronological."""
+    try:
+        table.update_item(
+            Key={"PK": pk, "SK": sk},
+            UpdateExpression="SET first_day = :d",
+            ConditionExpression="attribute_not_exists(first_day) OR first_day > :d",
+            ExpressionAttributeValues={":d": day},
+        )
+    except ClientError as exc:
+        if _is_conditional_failure(exc):
+            return  # stored first_day already earlier/equal -- expected, not an error
+        raise
+
+
+def _ensure_config(table) -> None:
+    """Persist the running writer's SHARDS so the reader can assert against it and
+    fail loudly on drift. Bounded to ~once per Lambda container via a module flag
+    (not once per upload). Best-effort: the reader tolerates an absent CONFIG."""
+    global _config_ensured
+    if _config_ensured:
+        return
+    try:
+        table.put_item(Item={"PK": "CONFIG", "SK": "SHARDS", "value": SHARDS})
+    except ClientError:
+        pass
+    _config_ensured = True
+
+
 def _claim_and_count(table, record, now_epoch: int, ttl_seconds: int) -> bool:
     """Claim the object (conditional marker put) and apply the rollups. Returns
     True on a first sighting (claim succeeded, rollups applied), False on a
@@ -149,26 +209,32 @@ def _claim_and_count(table, record, now_epoch: int, ttl_seconds: int) -> bool:
         raise
 
     # 2. Count. Compensate + un-claim on failure so the retry re-counts exactly once.
-    # Order matters: the participant-scoped rollup stays first so the
-    # compensate-and-unclaim saga (and its call-count-based tests) are stable.
-    # The study-level per-stream rollup is always written; the study-level total
-    # rollup is gated by WRITE_STUDY_ROLLUP.
-    rollup_pks = [
-        _stream_rollup_pk(record.study, record.patient, record.stream),
-        _study_stream_rollup_pk(record.study, record.stream),
+    # Targets are (pk, sk) pairs because they no longer share one SK shape. Order
+    # matters: the participant-scoped rollup stays FIRST and the participant-daily
+    # aggregate is appended LAST, so the existing call-count-based saga tests keep
+    # their targets (call #1 = per-stream, #2 = study-stream). The study-level total
+    # rollup is gated by WRITE_STUDY_ROLLUP; the per-stream and participant-daily
+    # rollups are always written.
+    day_sk = f"DAY#{day}"
+    targets = [
+        (_stream_rollup_pk(record.study, record.patient, record.stream), day_sk),
+        (_study_stream_rollup_pk(record.study, record.stream), day_sk),
     ]
     if WRITE_STUDY_ROLLUP:
-        rollup_pks.append(_study_pk(record.study))
+        targets.append((_study_pk(record.study), day_sk))
+    targets.append(
+        (_participant_daily_pk(record.study, record.patient), f"P#{record.patient}#{day_sk}")
+    )
 
     applied = []
     try:
-        for pk in rollup_pks:
-            _add_rollup(table, pk, day, 1, record.size)
-            applied.append(pk)
+        for pk, sk in targets:
+            _add_rollup(table, pk, sk, 1, record.size)
+            applied.append((pk, sk))
     except ClientError:
-        for pk in applied:  # best-effort compensation of the partial counts
+        for pk, sk in applied:  # best-effort compensation of the partial counts
             try:
-                _add_rollup(table, pk, day, -1, -record.size)
+                _add_rollup(table, pk, sk, -1, -record.size)
             except ClientError:
                 pass
         try:
@@ -185,6 +251,7 @@ def write_record(table, record, now_epoch: int, ttl_seconds: int) -> str:
     Raises ClientError for transient/non-conditional failures so the caller can
     return the message to SQS for retry.
     """
+    _ensure_config(table)
     first_time = _claim_and_count(table, record, now_epoch, ttl_seconds)
 
     # Latest pointers advance on every delivery (idempotent advance-only), so a
@@ -196,6 +263,10 @@ def write_record(table, record, now_epoch: int, ttl_seconds: int) -> str:
     _advance_latest_pointer(
         table, _study_pk(record.study), f"LATEST#P#{record.patient}#S#{record.stream}",
         record, include_stream=False,
+    )
+    # First-seen day pointer advances earliest (idempotent), like the latest pointers.
+    _advance_first_pointer(
+        table, _study_pk(record.study), f"FIRST#P#{record.patient}", record.upload_time[:10],
     )
 
     return WRITTEN if first_time else DUPLICATE
