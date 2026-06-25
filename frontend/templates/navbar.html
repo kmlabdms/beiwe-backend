@@ -132,6 +132,18 @@
         </li>
         {% endif %}
 
+        {% if METADATA_INDEX_ENABLED and page_location != 'metadata_dashboard' %}
+        <li
+          role="presentation"
+          class="pulse-text-hover"
+        >
+          <a
+            href="{{ easy_url('metadata_dashboard_endpoints.metadata_dashboard_page', study_id=study.id) }}"
+            aria-label="Go to the upload activity monitor for {{study.name}}"
+          >Upload Activity</a>
+        </li>
+        {% endif %}
+
         {% endif %}
 
         {% if study and study.forest_enabled %}

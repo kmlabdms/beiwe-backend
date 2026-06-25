@@ -57,3 +57,30 @@ prod-migrate:
 prod-collect-static:
 	@echo "\n\n\nCollecting static files.."
 	docker compose -f docker_management/prod.docker-compose.yml --env-file docker_management/.envs/.env.prod exec -u 0 web python manage.py collectstatic --no-input --clear
+
+# --- Upload Metadata Index dashboard deploy helpers ---------------------------
+# Wraps cluster_management/cdk/deploy_metadata_index.sh. Mutating targets are
+# PREVIEW-ONLY by default; pass APPLY=true to actually change infrastructure
+# (EXECUTE=true for the destructive reset). Override AWS_PROFILE / AWS_REGION /
+# READER_PRINCIPAL_ARN as needed, e.g.:
+#   make metadata-index-deploy AWS_PROFILE=eb-cli            # preview
+#   make metadata-index-deploy AWS_PROFILE=eb-cli APPLY=true # deploy + set web env
+METADATA_INDEX_SCRIPT := cluster_management/cdk/deploy_metadata_index.sh
+export AWS_PROFILE AWS_REGION READER_PRINCIPAL_ARN EB_APP EB_ENV STACK_NAME I_UNDERSTAND_THIS_DELETES_DATA
+
+.PHONY: metadata-index-web-arn metadata-index-outputs metadata-index-set-env metadata-index-deploy metadata-index-reset
+
+metadata-index-web-arn:
+	$(METADATA_INDEX_SCRIPT) web-arn
+
+metadata-index-outputs:
+	$(METADATA_INDEX_SCRIPT) outputs
+
+metadata-index-set-env:
+	$(METADATA_INDEX_SCRIPT) set-env $(if $(APPLY),--apply,)
+
+metadata-index-deploy:
+	$(METADATA_INDEX_SCRIPT) deploy $(if $(APPLY),--apply,)
+
+metadata-index-reset:
+	$(METADATA_INDEX_SCRIPT) reset $(if $(EXECUTE),--execute,)

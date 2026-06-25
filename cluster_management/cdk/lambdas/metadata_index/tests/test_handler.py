@@ -69,6 +69,12 @@ def _stream_rollup(table, stream):
     return _item(table, f"STUDY#{STUDY}#P#{PATIENT}#S#{stream}", f"DAY#{DAY}")
 
 
+def _study_stream_rollup(table, stream):
+    """Study-level per-stream daily rollup (no patient segment) -- the dashboard's
+    bounded-read source."""
+    return _item(table, f"STUDY#{STUDY}#S#{stream}", f"DAY#{DAY}")
+
+
 # --- happy path --------------------------------------------------------------
 
 def test_happy_batch_writes_dedupe_latest_and_rollups(table):
@@ -89,6 +95,14 @@ def test_happy_batch_writes_dedupe_latest_and_rollups(table):
     # study-level rollup aggregates all three
     study = _item(table, f"STUDY#{STUDY}", f"DAY#{DAY}")
     assert int(study["count"]) == 3 and int(study["bytes"]) == 350
+
+    # study-level per-stream rollups (the dashboard's bounded-read source): same
+    # per-stream totals as the participant-scoped rollups, but without a patient
+    # segment so they're readable in one Query per stream.
+    accel_ss = _study_stream_rollup(table, "accelerometer")
+    assert int(accel_ss["count"]) == 2 and int(accel_ss["bytes"]) == 300
+    gps_ss = _study_stream_rollup(table, "gps")
+    assert int(gps_ss["count"]) == 1 and int(gps_ss["bytes"]) == 50
 
     # participant + participant/stream latest pointers exist
     assert _item(table, f"STUDY#{STUDY}", f"LATEST#P#{PATIENT}") is not None
@@ -233,15 +247,16 @@ def test_transient_rollup_failure_rolls_back_and_retry_recounts_once(table, monk
 
 
 def test_split_brain_avoided_when_second_rollup_fails(table, monkeypatch):
-    """If the study rollup fails after the per-stream rollup applied, the applied
-    one is compensated and the marker removed, so the retry leaves the per-stream
-    and study rollups consistent (both == 1), never split-brained."""
+    """If the second rollup (now the study-level per-stream rollup) fails after the
+    participant-scoped rollup applied, the applied one is compensated and the marker
+    removed, so the retry leaves all three rollups consistent (each == 1), never
+    split-brained."""
     real_add = dynamo_writer._add_rollup
     calls = {"n": 0}
 
     def flaky_add(*args, **kwargs):
         calls["n"] += 1
-        if calls["n"] == 2:  # fail the SECOND rollup (study) on first delivery
+        if calls["n"] == 2:  # fail the SECOND rollup ADD on first delivery
             raise ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
         return real_add(*args, **kwargs)
 
@@ -250,8 +265,10 @@ def test_split_brain_avoided_when_second_rollup_fails(table, monkeypatch):
     handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)   # fails + compensates
     handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)   # retry succeeds
     stream = _stream_rollup(table, "gps")
+    study_stream = _study_stream_rollup(table, "gps")
     study = _item(table, f"STUDY#{STUDY}", f"DAY#{DAY}")
     assert int(stream["count"]) == 1 and int(stream["bytes"]) == 50
+    assert int(study_stream["count"]) == 1 and int(study_stream["bytes"]) == 50  # consistent
     assert int(study["count"]) == 1 and int(study["bytes"]) == 50   # consistent, not 2-vs-1
 
 

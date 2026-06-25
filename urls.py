@@ -8,9 +8,9 @@ from constants.common_constants import RUNNING_TESTS
 from constants.url_constants import (IGNORE, LOGIN_REDIRECT_IGNORE, LOGIN_REDIRECT_SAFE, SAFE,
     urlpatterns)
 from endpoints import (data_api_endpoints, data_page_endpoints, forest_endpoints, login_endpoints,
-    manage_researcher_endpoints, manage_study_endpoints, misc_download_endpoints, mobile_endpoints,
-    participant_endpoints, raw_data_api_endpoints, study_endpoints, survey_endpoints,
-    system_admin_endpoints)
+    manage_researcher_endpoints, manage_study_endpoints, metadata_dashboard_endpoints,
+    misc_download_endpoints, mobile_endpoints, participant_endpoints, raw_data_api_endpoints,
+    study_endpoints, survey_endpoints, system_admin_endpoints)
 
 
 def path(
@@ -79,6 +79,13 @@ path(
 path(
     "dashboard/<int:study_id>/patient/<str:patient_id>",
     data_page_endpoints.dashboard_participant_page,
+    login_redirect=SAFE,
+)
+
+# Upload Metadata Index dashboard (opt-in, read-only; per-study upload-activity monitor)
+path(
+    "metadata_dashboard/<int:study_id>",
+    metadata_dashboard_endpoints.metadata_dashboard_page,
     login_redirect=SAFE,
 )
 

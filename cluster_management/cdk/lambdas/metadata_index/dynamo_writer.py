@@ -61,6 +61,15 @@ def _stream_rollup_pk(study: str, patient: str, stream: str) -> str:
     return f"STUDY#{study}#P#{patient}#S#{stream}"
 
 
+def _study_stream_rollup_pk(study: str, stream: str) -> str:
+    """Study-level per-stream daily rollup (no patient segment). This is the
+    bounded-read source for the in-app per-study dashboard: per-stream study
+    totals/trends are one Query per stream, instead of a per-(participant,stream)
+    fan-out. Always written (independent of WRITE_STUDY_ROLLUP) and lives in its
+    own partition, so it does not add load to the STUDY#<study> partition."""
+    return f"STUDY#{study}#S#{stream}"
+
+
 def _is_conditional_failure(exc: ClientError) -> bool:
     return exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
 
@@ -140,7 +149,14 @@ def _claim_and_count(table, record, now_epoch: int, ttl_seconds: int) -> bool:
         raise
 
     # 2. Count. Compensate + un-claim on failure so the retry re-counts exactly once.
-    rollup_pks = [_stream_rollup_pk(record.study, record.patient, record.stream)]
+    # Order matters: the participant-scoped rollup stays first so the
+    # compensate-and-unclaim saga (and its call-count-based tests) are stable.
+    # The study-level per-stream rollup is always written; the study-level total
+    # rollup is gated by WRITE_STUDY_ROLLUP.
+    rollup_pks = [
+        _stream_rollup_pk(record.study, record.patient, record.stream),
+        _study_stream_rollup_pk(record.study, record.stream),
+    ]
     if WRITE_STUDY_ROLLUP:
         rollup_pks.append(_study_pk(record.study))
 

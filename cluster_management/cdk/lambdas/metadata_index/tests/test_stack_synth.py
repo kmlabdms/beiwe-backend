@@ -67,6 +67,28 @@ def test_reader_role_is_query_getitem_only_no_scan(template):
     assert "dynamodb:Scan" not in all_reader_actions
 
 
+def test_reader_role_trust_scoped_to_principal_when_provided():
+    """With reader_principal_arn set, the reader role trusts that exact principal
+    (not the whole account), so the participant roster isn't assumable account-wide."""
+    app = cdk.App()
+    stack = MetadataIndexStack(
+        app, "ScopedMetaStack", raw_bucket_name="my-raw-bucket",
+        reader_principal_arn="arn:aws:iam::123456789012:user/beiwe-web",
+    )
+    tmpl = Template.from_stack(stack)
+    tmpl.has_resource_properties("AWS::IAM::Role", {
+        "Description": "Least-privilege read access to the upload metadata index.",
+        "AssumeRolePolicyDocument": {
+            "Statement": Match.array_with([
+                Match.object_like({
+                    "Action": "sts:AssumeRole",
+                    "Principal": {"AWS": "arn:aws:iam::123456789012:user/beiwe-web"},
+                }),
+            ]),
+        },
+    })
+
+
 # --- U2: SQS + DLQ + EventBridge wiring on the imported bucket ----------------
 
 def test_two_queues_with_redrive(template):

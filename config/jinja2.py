@@ -11,7 +11,7 @@ from django.urls import reverse
 from jinja2 import Environment
 from jinja2.ext import Extension
 
-from config.settings import SENTRY_JAVASCRIPT_DSN, SYSADMIN_EMAILS
+from config.settings import METADATA_INDEX_ENABLED, SENTRY_JAVASCRIPT_DSN, SYSADMIN_EMAILS
 from constants.common_constants import RUNNING_TESTS
 from libs.endpoint_helpers.participant_helpers import niceish_iso_time_format
 from libs.utils.dev_utils import p
@@ -61,6 +61,7 @@ def environment(**options: dict[str, Any]) -> Environment:
             "LocalAssets": LocalAssets,
             "SENTRY_JAVASCRIPT_DSN": SENTRY_JAVASCRIPT_DSN,
             "current_year": date.today().year,
+            "METADATA_INDEX_ENABLED": METADATA_INDEX_ENABLED,
             "len": len,
             "min": min,
             "max": max,

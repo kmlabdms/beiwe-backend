@@ -41,6 +41,19 @@ S3_ENDPOINT = getenv("S3_ENDPOINT", None)
 #  Defaults to us-east-1, A.K.A. US East (N. Virginia),
 S3_REGION_NAME: str = getenv("S3_REGION_NAME", "us-east-1")
 
+# Upload Metadata Index dashboard (opt-in, read-only).
+#  An in-app per-study dashboard over the DynamoDB Upload Metadata Index -- the
+#  additive S3 -> EventBridge -> Lambda -> DynamoDB upload-monitoring layer (see
+#  cluster_management/cdk/METADATA_INDEX.md). The page and its nav link appear only
+#  when METADATA_INDEX_ENABLED is 'true' AND the table name + reader-role ARN are set;
+#  otherwise the feature is silently off. Reads assume the least-privilege reader role
+#  (METADATA_INDEX_READER_ROLE_ARN) rather than using the server credentials directly,
+#  so the web server's IAM principal must be granted sts:AssumeRole on that role ARN.
+METADATA_INDEX_ENABLED: bool = getenv("METADATA_INDEX_ENABLED", "false").lower() == "true"
+METADATA_INDEX_TABLE_NAME: str = getenv("METADATA_INDEX_TABLE_NAME", None)
+METADATA_INDEX_REGION: str = getenv("METADATA_INDEX_REGION", "us-east-1")
+METADATA_INDEX_READER_ROLE_ARN: str = getenv("METADATA_INDEX_READER_ROLE_ARN", None)
+
 # Domain name for the server, this is used for various details, and should be match the address of
 #  the frontend server.
 DOMAIN_NAME: str = getenv("DOMAIN_NAME")

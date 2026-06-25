@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Upload Activity{% endblock %}
+
+{% block content %}
+
+<ol class="breadcrumb">
+  <li>
+    <a
+      href="/view_study/{{ study.id }}"
+      aria-label="click to go to the study page for {{ study.name }}"
+    >{{ study.name }}</a>
+  </li>
+  <li class="active">Upload Activity</li>
+</ol>
+
+<h1 class="h2">{{ study.name }} &mdash; Upload Activity Monitor</h1>
+<p class="text-muted">
+  Live view of <strong>raw upload arrival</strong> derived from S3 object-created events
+  (times are UTC upload-arrival, not device collection time). This is distinct from the
+  <a href="{{ easy_url('data_page_endpoints.dashboard_page', study_id=study.id) }}">data dashboard</a>,
+  which reports <em>processed</em> data quantities &mdash; the two numbers are expected to differ.
+</p>
+
+{% if state == 'not_configured' %}
+  {# Feature is opt-in and not enabled/configured in this environment. #}
+  <div class="alert alert-info">
+    The upload metadata index is not available in this environment.
+  </div>
+
+{% elif state == 'read_error' %}
+  {# Loud, distinct failure -- never shown alongside zero-filled data so it can't be #}
+  {# mistaken for "no data". Most commonly a missing sts:AssumeRole grant. #}
+  <div class="alert alert-danger">
+    <strong>Could not reach the upload metadata index.</strong>
+    This usually means the dashboard's read role or permissions are misconfigured
+    (the web server must be allowed to assume the metadata-index reader role).
+    Try again shortly; if it persists, contact your system administrator.
+  </div>
+
+{% elif not summary.has_data %}
+  <div class="alert alert-warning">
+    No upload activity has been recorded for this study yet.
+  </div>
+
+{% else %}
+
+  {# ---- 1. top-line stats ---- #}
+  <div class="row">
+    {% set stat_cells = [
+      ('Participants', summary.stats.participants),
+      ('Streams', summary.stats.streams),
+      ('Uploads', summary.stats.uploads),
+      ('Volume', summary.stats.bytes_h),
+    ] %}
+    {% for label, value in stat_cells %}
+    <div class="col-xs-6 col-sm-3">
+      <div class="panel panel-default text-center">
+        <div class="panel-body">
+          <div class="h3" style="margin:0">{{ value }}</div>
+          <div class="text-muted">{{ label }}</div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% if summary.stats.first_day %}
+  <p class="text-muted">
+    Activity window: {{ summary.stats.first_day }} &rarr; {{ summary.stats.last_day }}.
+    Streams are flagged <span class="label label-warning">stale</span> after no upload for
+    {{ summary.stale_hours }}h.
+  </p>
+  {% endif %}
+
+  {# ---- 2. recently-active feed ---- #}
+  <h3>Recently active</h3>
+  <table class="table table-condensed table-striped">
+    <thead><tr><th>When</th><th>Participant</th><th>Stream</th><th class="text-right">Last file</th></tr></thead>
+    <tbody>
+      {% for row in summary.feed %}
+      <tr>
+        <td>{{ row.ago }}</td>
+        <td>{{ row.patient }}</td>
+        <td>{{ row.stream }}</td>
+        <td class="text-right text-muted">{{ row.last_size_h }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {# ---- 3. per-participant freshness (grouped by participant) ---- #}
+  <h3>Participant &amp; stream freshness</h3>
+  {% for p in summary.participants %}
+  <div class="panel {% if p.stale %}panel-warning{% else %}panel-default{% endif %}">
+    <div class="panel-heading">
+      {% if p.stale %}
+        <span class="label label-warning">stale</span>
+      {% else %}
+        <span class="label label-success">active</span>
+      {% endif %}
+      <strong>{{ p.patient }}</strong>
+      <span class="text-muted">last upload {{ p.ago }}</span>
+    </div>
+    <table class="table table-condensed">
+      <thead><tr><th>Stream</th><th>Last upload</th><th class="text-right">Last file</th><th></th></tr></thead>
+      <tbody>
+        {% for s in p.streams %}
+        <tr {% if s.stale %}class="warning"{% endif %}>
+          <td>{{ s.stream }}</td>
+          <td>{{ s.ago }}</td>
+          <td class="text-right text-muted">{{ s.last_size_h }}</td>
+          <td>{% if s.stale %}<span class="label label-warning">stale &gt;{{ summary.stale_hours }}h</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+
+  {# ---- 4. per-stream totals (bounded read from the study-level per-stream rollup) ---- #}
+  <h3>Per-stream totals</h3>
+  <table class="table table-condensed table-striped">
+    <thead><tr><th>Stream</th><th class="text-right">Files</th><th class="text-right">Volume</th><th>Last upload</th><th></th></tr></thead>
+    <tbody>
+      {% for s in summary.stream_totals %}
+      <tr {% if s.stale %}class="warning"{% endif %}>
+        <td>{{ s.stream }}</td>
+        <td class="text-right">{{ s.count }}</td>
+        <td class="text-right">{{ s.bytes_h }}</td>
+        <td>{{ s.ago }}</td>
+        <td>{% if s.stale %}<span class="label label-warning">stale</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {# ---- 5. daily upload volume (server-rendered bars, no JS charting lib) ---- #}
+  <h3>Daily upload volume</h3>
+  <table class="table table-condensed">
+    <tbody>
+      {% for d in summary.daily %}
+      <tr>
+        <td style="width:8em" class="text-muted">{{ d.day }}</td>
+        <td>
+          <div class="progress" style="margin:0">
+            <div class="progress-bar" role="progressbar" style="width: {{ d.pct }}%">{{ d.count }}</div>
+          </div>
+        </td>
+        <td style="width:8em" class="text-right text-muted">{{ d.bytes_h }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+{% endif %}
+
+{% endblock %}

@@ -19,7 +19,8 @@ behind the `enable_metadata_index` context flag. Lambda code lives in
 |---|---|
 | Last upload per participant | `STUDY#<study>` / `LATEST#P#<patient>` |
 | Last upload per participant + stream | `STUDY#<study>` / `LATEST#P#<patient>#S#<stream>` |
-| Counts / bytes over time (per stream) | `STUDY#<study>#P#<patient>#S#<stream>` / `DAY#<YYYY-MM-DD>` |
+| Counts / bytes over time (per participant + stream) | `STUDY#<study>#P#<patient>#S#<stream>` / `DAY#<YYYY-MM-DD>` |
+| Counts / bytes over time (per stream, whole study) | `STUDY#<study>#S#<stream>` / `DAY#<YYYY-MM-DD>` |
 | Study-level volume trend | `STUDY#<study>` / `DAY#<YYYY-MM-DD>` |
 | Stale-stream detection | query `STUDY#<study>`, `begins_with LATEST#P#`, filter `last_upload_time < threshold` |
 | Idempotency / per-object log | `OBJ#<key>` / `OBJ` (TTL'd) |
@@ -28,6 +29,19 @@ behind the `enable_metadata_index` context flag. Lambda code lives in
 > streams **expected but never uploaded** needs Beiwe's expected-stream config and
 > is deferred (Phase 2). Grafana dashboards are a downstream consumer (Phase 2);
 > this layer only collects the data and exposes a `begins_with`-friendly schema.
+
+### Study-level per-stream rollup (`STUDY#<study>#S#<stream>` / `DAY#`)
+
+The writer keeps a study-level per-stream daily rollup **in addition to** the
+participant-scoped one. It exists so per-stream study totals/trends are a bounded
+read — one `Query` per stream (≤ ~20), independent of participant count — for the
+in-app per-study dashboard, instead of a per-(participant,stream) fan-out. It is
+always written (independent of `WRITE_STUDY_ROLLUP`) and lives in its own
+partition, so it adds no load to the `STUDY#<study>` partition. It is a study-level
+**aggregate**: like the `STUDY#<study>` / `DAY#` rollup it cannot single out a
+participant (see participant-erasure note below). The scan-based `show_metadata_index.py`
+deliberately ignores these items (it already derives per-stream totals from the
+participant-scoped rollups).
 
 ## Deploy (opt-in)
 
@@ -110,21 +124,103 @@ is a deliberate procedure, not something TTL satisfies. To erase a participant:
    **Scan with a FilterExpression** (`FilterExpression: patient = :p`), which needs the
    admin/deploy credentials, **not** the read-only `MetadataIndexReaderRole`. Scan and
    `delete-item` each match.
-4. Confirm none remain. Note that **study-level** `DAY#` rollups are aggregates and do
-   not single out a participant; rebuild them from raw S3 if exact study totals must
+4. Confirm none remain. Note that **study-level** aggregates — both `STUDY#<study>` /
+   `DAY#` and `STUDY#<study>#S#<stream>` / `DAY#` (the per-stream rollup) — do not
+   single out a participant; rebuild them from raw S3 if exact study totals must
    exclude the erased participant.
 
 > A `study_id` + `patient_id` erasure helper script (doing all three steps) is a
 > reasonable future addition so the procedure is equally runnable by a human, an agent,
 > or a CI job — deferred with the rest of the Phase 2 operational tooling.
 
-## Reader access (Grafana and humans)
+## Reader access (the Beiwe web app, Grafana, humans)
 
 Read the table via the least-privilege `MetadataIndexReaderRole` (the
 `ReaderRoleArn` stack output): `dynamodb:Query` + `GetItem` only, no `Scan`, no
-writes. Grant `sts:AssumeRole` on it to the specific Grafana datasource principal
-— **do not** read the table with the account-wide AdministratorAccess deploy user.
-The table is effectively a full participant-upload roster.
+writes. Grant `sts:AssumeRole` on it to the specific reader principal — **do not**
+read the table with the account-wide AdministratorAccess deploy user. The table is
+effectively a full participant-upload roster.
+
+Scope the role's **trust** to that principal at deploy time so it isn't assumable
+account-wide:
+
+```bash
+cdk deploy MetadataIndexStack -c enable_metadata_index=true \
+  -c reader_principal_arn=arn:aws:iam::<acct>:user/<beiwe-web-iam-user>
+```
+
+### Wiring the in-app dashboard (`endpoints/metadata_dashboard_endpoints.py`)
+
+The Django web tier reads the index by assuming `ReaderRoleArn` with its existing
+`BEIWE_SERVER_AWS_*` credentials (refreshable STS creds; no expiry on a long-lived
+worker).
+
+**Authorization is same-account.** The web tier and this stack live in the same AWS
+account, and assume-role authorization can come from *either* side of the trust:
+
+- **Recommended (scoped trust, no extra IAM):** deploy with `reader_principal_arn`
+  set to the web server's IAM principal. For same-account assumption, a trust policy
+  that names a *specific* principal is sufficient on its own — **no identity-based
+  `sts:AssumeRole` grant on the web principal is required.** Deploying the stack is
+  the whole authorization step.
+- **Identity-side grant is only needed if:** you used the `AccountRootPrincipal`
+  fallback (omitted `reader_principal_arn`, so the trust delegates to the account and
+  the caller must hold its own `sts:AssumeRole` on the role ARN), **or** an SCP /
+  permission boundary on the web principal requires an explicit allow. This grant is
+  an out-of-band IAM edit on the web user/role because that principal is provisioned
+  by the EB / `launch_script.py` deployment, not by this additive stack (which never
+  mutates Beiwe-owned IAM). Last-resort fallback: grant the web principal
+  `dynamodb:Query`/`GetItem` directly on the table ARN.
+
+Then **app settings** — set `METADATA_INDEX_ENABLED=true`, `METADATA_INDEX_TABLE_NAME`
+(the `TableName` output), `METADATA_INDEX_REGION`, and `METADATA_INDEX_READER_ROLE_ARN`
+(the `ReaderRoleArn` output) in the web environment; keep `DEBUG=False`.
+
+### Scripted deploy (`make` / `deploy_metadata_index.sh`)
+
+`deploy_metadata_index.sh` automates the above; the repo-root `Makefile` wraps it.
+Mutating targets are **preview-only** unless you pass `APPLY=true` (or `EXECUTE=true`
+for the reset), so a bare run never changes anything.
+
+```bash
+make metadata-index-web-arn AWS_PROFILE=<p>     # resolve the runtime web principal ARN
+make metadata-index-outputs AWS_PROFILE=<p>     # show TableName / ReaderRoleArn / region
+make metadata-index-deploy  AWS_PROFILE=<p>             # PREVIEW: cdk deploy (scoped trust) + set web env
+make metadata-index-deploy  AWS_PROFILE=<p> APPLY=true  # actually deploy the stack + eb setenv
+make metadata-index-set-env AWS_PROFILE=<p> APPLY=true  # just (re)set the EB web env from stack outputs
+```
+
+All resolution and mutation go through the `aws` CLI (no `eb` CLI dependency).
+`deploy` auto-derives `reader_principal_arn` (the principal that assumes the reader
+role) by reading the web env's `BEIWE_SERVER_AWS_ACCESS_KEY_ID` off the EB environment
+and mapping it to its IAM user (or, if the web tier has no such keys, the EB
+instance-profile role); override with `READER_PRINCIPAL_ARN=...`. The web env vars are
+written with `aws elasticbeanstalk update-environment` against `EB_APP`/`EB_ENV`
+(default `beiwe-application` / `kowalski-beiwe`, overridable). The deployer's profile
+needs `elasticbeanstalk:*`, `iam:GetAccessKeyLastUsed`/`GetInstanceProfile`, and
+`cloudformation:DescribeStacks`.
+
+The destructive schema reset is deliberately separate and double-gated:
+
+```bash
+make metadata-index-reset AWS_PROFILE=<p>                                          # prints the plan
+make metadata-index-reset AWS_PROFILE=<p> EXECUTE=true I_UNDERSTAND_THIS_DELETES_DATA=yes   # runs it
+```
+
+**Verify before relying on the page** (run as the web principal):
+
+```bash
+CREDS=$(aws sts assume-role --role-arn "$ReaderRoleArn" --role-session-name verify --query Credentials --output json)
+AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .AccessKeyId) \
+AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .SecretAccessKey) \
+AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .SessionToken) \
+aws dynamodb query --table-name "$TableName" \
+  --key-condition-expression "PK = :pk AND begins_with(SK, :sk)" \
+  --expression-attribute-values '{":pk":{"S":"STUDY#<study24>"},":sk":{"S":"DAY#"}}'
+```
+
+If the grant is missing the dashboard surfaces a loud "could not reach the index"
+state (it never silently looks "disabled").
 
 ## Observability
 
@@ -146,6 +242,27 @@ same key will **double-count**. Therefore:
 - The deferred backfill (Phase 2) must be a **full rebuild** (delete-then-
   repopulate) or run through the same per-object dedupe gate — never an additive
   merge over a live index.
+
+## Schema-change reset (ordered drain)
+
+When a writer change adds or alters a rollup shape (e.g. the study-level per-stream
+rollup) and the existing index data is disposable, repopulate cleanly with an
+**ordered drain** rather than a backfill — the drain prevents the reset from itself
+double-counting in-flight or dead-lettered events (which would otherwise re-pass the
+`attribute_not_exists` dedupe gate against a freshly-wiped table):
+
+1. **Stop ingestion:** `aws events disable-rule --name "$RULE"` (the `EventBridgeRuleName` output).
+2. **Drain the buffers:** wait for the main queue and DLQ to empty, or purge them —
+   `aws sqs purge-queue --queue-url "$QueueUrl"` and the same for `$DlqUrl`. This is
+   the load-bearing step: any message still queued/retryable when the table is wiped
+   would re-count.
+3. **Wipe:** delete all items (or delete + recreate the table).
+4. **Redeploy** the writer with the new rollup: `cdk deploy MetadataIndexStack -c enable_metadata_index=true`.
+5. **Resume ingestion:** `aws events enable-rule --name "$RULE"`.
+
+The index then repopulates from go-forward uploads (no historical backfill). Only run
+this against a **dev/disposable** table — confirm no consumer depends on the existing
+data first.
 
 ## Tests
 

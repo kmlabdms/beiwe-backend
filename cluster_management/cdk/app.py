@@ -29,6 +29,15 @@ BeiweSchedulerStack(app, "BeiweSchedulerStack", env_name=env_name, env=env)
 # conditional-synthesis gate — the other stacks above instantiate unconditionally.
 if is_truthy(app.node.try_get_context("enable_metadata_index")):
     raw_bucket_name = app.node.try_get_context("raw_bucket_name") or DEFAULT_RAW_BUCKET
-    MetadataIndexStack(app, "MetadataIndexStack", raw_bucket_name=raw_bucket_name, env=env)
+    # Optional: scope the reader role's trust to a specific principal (e.g. the web
+    # server's IAM user/role ARN) instead of the whole account. Pass with
+    # --context reader_principal_arn=arn:aws:iam::<acct>:user/<name>.
+    reader_principal_arn = app.node.try_get_context("reader_principal_arn")
+    MetadataIndexStack(
+        app, "MetadataIndexStack",
+        raw_bucket_name=raw_bucket_name,
+        reader_principal_arn=reader_principal_arn,
+        env=env,
+    )
 
 app.synth()

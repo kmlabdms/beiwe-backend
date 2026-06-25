@@ -56,6 +56,7 @@ class MetadataIndexStack(Stack):
         raw_bucket_name: str,
         ttl_days: int = 90,
         metric_namespace: str = "BeiweUploadMetadata",
+        reader_principal_arn: str = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -71,14 +72,21 @@ class MetadataIndexStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,    # operational-safety, NOT a retention policy
         )
 
-        # Read access for downstream consumers (e.g. Grafana). Least privilege:
-        # Query + GetItem only, no Scan, no writes. Assumable by named principals
-        # the account grants sts:AssumeRole to — not the AdministratorAccess
-        # deploy user. The table is a full participant-upload roster.
+        # Read access for downstream consumers (e.g. the in-app dashboard, Grafana).
+        # Least privilege: Query + GetItem only, no Scan, no writes. The table is a
+        # full participant-upload roster, so prefer scoping the trust to the specific
+        # reader principal (the web server's IAM user/role) via reader_principal_arn;
+        # absent that, fall back to AccountRootPrincipal (any account principal the
+        # account separately grants sts:AssumeRole to). Either way the deploy user's
+        # AdministratorAccess must not be the path used to read it.
+        reader_trust = (
+            iam.ArnPrincipal(reader_principal_arn) if reader_principal_arn
+            else iam.AccountRootPrincipal()
+        )
         reader_role = iam.Role(
             self,
             "ReaderRole",
-            assumed_by=iam.AccountRootPrincipal(),
+            assumed_by=reader_trust,
             description="Least-privilege read access to the upload metadata index.",
         )
         table.grant(reader_role, "dynamodb:Query", "dynamodb:GetItem")
