@@ -173,8 +173,52 @@ EOF
   fi
 }
 
+_wait_drained() {  # $1 = queue url; poll until visible + in-flight messages reach 0
+  local url="$1" tries=0 vis notvis
+  while :; do
+    read -r vis notvis <<EOF
+$(aws sqs get-queue-attributes --queue-url "$url" --region "$AWS_REGION" $(aws_profile_arg) \
+    --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+    --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' --output text)
+EOF
+    [ "${vis:-0}" = "0" ] && [ "${notvis:-0}" = "0" ] && break
+    tries=$((tries + 1))
+    [ "$tries" -gt 60 ] && die "queue did not drain after ~5min: $url ($vis visible / $notvis in-flight) -- investigate stuck or DLQ'd messages"
+    echo "   draining $url: $vis visible / $notvis in-flight ..."
+    sleep 5
+  done
+}
+
+cmd_backfill() {
+  # Non-destructive: derive the participant-daily aggregate + first-seen from the
+  # existing per-stream rollups via SET, while ingestion is paused. Drains by WAITING
+  # (the live writer finishes queued uploads into the rollups) -- never purges.
+  have aws; have python3
+  local rule queue dlq
+  rule="$(cfn_output EventBridgeRuleName)"; queue="$(cfn_output QueueUrl)"; dlq="$(cfn_output DlqUrl)"
+  [ -n "$rule" ] && [ "$rule" != "None" ] || die "no stack outputs; deploy MetadataIndexStack first"
+  local py=("$SCRIPT_DIR/backfill_participant_daily.py" --region "$AWS_REGION" --stack "$STACK_NAME")
+  [ -n "$AWS_PROFILE" ] && py+=(--profile "$AWS_PROFILE")
+  if ! $APPLY; then
+    echo "PREVIEW: disable rule $rule -> wait for queue+DLQ to drain -> SET-backfill -> re-enable rule."
+    python3 "${py[@]}"
+    echo "(preview only -- re-run with --apply to pause ingestion and write)"
+    return
+  fi
+  echo ">> disabling ingestion rule $rule ..."
+  aws events disable-rule --name "$rule" --region "$AWS_REGION" $(aws_profile_arg)
+  echo ">> draining queue + DLQ (waiting, not purging) ..."
+  _wait_drained "$queue"
+  _wait_drained "$dlq"
+  echo ">> backfilling (SET from existing rollups) ..."
+  python3 "${py[@]}" --apply
+  echo ">> re-enabling ingestion rule ..."
+  aws events enable-rule --name "$rule" --region "$AWS_REGION" $(aws_profile_arg)
+  echo ">> backfill complete; ingestion resumed."
+}
+
 # --- arg parsing ----------------------------------------------------------------
-[ $# -ge 1 ] || die "usage: $0 {web-arn|outputs|set-env|deploy|reset} [--apply|--execute] [--profile P] [--region R]"
+[ $# -ge 1 ] || die "usage: $0 {web-arn|outputs|set-env|deploy|backfill|reset} [--apply|--execute] [--profile P] [--region R]"
 SUBCMD="$1"; shift
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -192,6 +236,7 @@ case "$SUBCMD" in
   outputs)  cmd_outputs ;;
   set-env)  cmd_set_env ;;
   deploy)   cmd_deploy ;;
+  backfill) cmd_backfill ;;
   reset)    cmd_reset ;;
   *) die "unknown subcommand: $SUBCMD" ;;
 esac
