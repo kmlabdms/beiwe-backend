@@ -3,7 +3,6 @@ from django.views.decorators.http import require_GET
 
 from authentication.admin_authentication import (authenticate_researcher_study_access,
     ResearcherRequest)
-from config.settings import METADATA_INDEX_ENABLED
 from database.study_models import Study
 from libs import metadata_index_reader
 
@@ -24,13 +23,12 @@ def metadata_dashboard_page(request: ResearcherRequest, study_id: int):
         study=study,
         study_id=study_id,
         page_location="metadata_dashboard",
-        metadata_index_enabled=METADATA_INDEX_ENABLED,
     )
 
-    # The decorator guarantees study exists; object_id is the DynamoDB STUDY#<id> key.
-    object_id = Study.value_get("object_id", pk=study_id)
+    # object_id is the DynamoDB STUDY#<id> partition key; reuse the already-fetched
+    # study row (the navbar reads METADATA_INDEX_ENABLED from a Jinja global, not context).
     try:
-        context.update(state="ok", summary=metadata_index_reader.study_summary(object_id))
+        context.update(state="ok", summary=metadata_index_reader.study_summary(study.object_id))
     except metadata_index_reader.MetadataIndexNotConfigured:
         context.update(state="not_configured")
     except (metadata_index_reader.MetadataIndexReadError,

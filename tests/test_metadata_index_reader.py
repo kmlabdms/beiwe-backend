@@ -40,8 +40,13 @@ CANNED = {
         {"SK": "LATEST#P#p2", "last_upload_time": "2026-05-28T19:00:00Z", "last_stream": "gps", "last_size": 5},
         {"SK": "LATEST#P#p2#S#gps", "last_upload_time": "2026-05-28T19:00:00Z", "last_size": 5},
     ],
-    (f"STUDY#{OID}#S#gps", "DAY#"): [{"SK": "DAY#2026-05-28", "count": 4, "bytes": 255}],
-    (f"STUDY#{OID}#S#accelerometer", "DAY#"): [{"SK": "DAY#2026-05-20", "count": 1, "bytes": 10}],
+    # study daily trend + totals are derived from these per-stream rollups (summed):
+    # gps 3/250, accel 2/250  ->  study totals 5/500 across days 05-27 and 05-28.
+    (f"STUDY#{OID}#S#gps", "DAY#"): [
+        {"SK": "DAY#2026-05-27", "count": 2, "bytes": 200},
+        {"SK": "DAY#2026-05-28", "count": 1, "bytes": 50},
+    ],
+    (f"STUDY#{OID}#S#accelerometer", "DAY#"): [{"SK": "DAY#2026-05-28", "count": 2, "bytes": 250}],
 }
 
 
@@ -49,6 +54,14 @@ class TestAggregationHelpers(SimpleTestCase):
     def test_aggregate_daily(self):
         out = reader.aggregate_daily(CANNED[(PK, "DAY#")])
         self.assertEqual(out["2026-05-28"], {"count": 3, "bytes": 300})
+
+    def test_aggregate_daily_sums_across_partitions(self):
+        # merging per-stream rollups: the same day from two streams sums
+        merged = reader.aggregate_daily([
+            {"SK": "DAY#2026-05-28", "count": 1, "bytes": 50},
+            {"SK": "DAY#2026-05-28", "count": 2, "bytes": 250},
+        ])
+        self.assertEqual(merged["2026-05-28"], {"count": 3, "bytes": 300})
 
     def test_aggregate_latest_splits_participant_and_stream_pointers(self):
         participant, stream = reader.aggregate_latest(CANNED[(PK, "LATEST#P#")])
@@ -70,16 +83,16 @@ class TestStudySummary(SimpleTestCase):
 
         self.assertEqual(data["stats"]["participants"], 2)
         self.assertEqual(data["stats"]["streams"], 2)
-        self.assertEqual(data["stats"]["uploads"], 5)        # 2 + 3
-        self.assertEqual(data["stats"]["bytes"], 500)
+        self.assertEqual(data["stats"]["uploads"], 5)        # 3 (gps) + 2 (accel), derived from per-stream
+        self.assertEqual(data["stats"]["bytes"], 500)        # 250 + 250
         self.assertEqual(data["stats"]["first_day"], "2026-05-27")
         self.assertEqual(data["stats"]["last_day"], "2026-05-28")
         self.assertTrue(data["has_data"])
 
         totals = {s["stream"]: s for s in data["stream_totals"]}
-        self.assertEqual(totals["gps"]["count"], 4)          # from the new per-stream rollup
-        self.assertEqual(totals["gps"]["bytes"], 255)
-        self.assertEqual(totals["accelerometer"]["count"], 1)
+        self.assertEqual(totals["gps"]["count"], 3)          # summed across the gps rollup days
+        self.assertEqual(totals["gps"]["bytes"], 250)
+        self.assertEqual(totals["accelerometer"]["count"], 2)
 
     def test_freshness_has_no_cumulative_totals(self):
         # the freshness rows carry last-upload + stale + last_size only (bounded-read boundary)

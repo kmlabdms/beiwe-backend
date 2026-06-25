@@ -5,7 +5,7 @@ This is the Phase-2 consumer of the additive collection layer
 (cluster_management/cdk/METADATA_INDEX.md). It NEVER writes, NEVER scans, and NEVER
 reads raw S3. Every read is a per-study ``Query`` keyed ``PK = STUDY#<object_id>``
 with a ``begins_with`` sort-key condition, or a bounded per-stream ``Query`` on
-``STUDY#<object_id>#S#<stream>`` -- so the page cost is ``2 + #streams`` Queries,
+``STUDY#<object_id>#S#<stream>`` -- so the page cost is ``1 + #streams`` Queries,
 independent of participant count.
 
 Credentials: the web server assumes the least-privilege ``MetadataIndexReaderRole``
@@ -36,7 +36,6 @@ from botocore.session import get_session
 from config.settings import (BEIWE_SERVER_AWS_ACCESS_KEY_ID, BEIWE_SERVER_AWS_SECRET_ACCESS_KEY,
     METADATA_INDEX_ENABLED, METADATA_INDEX_READER_ROLE_ARN, METADATA_INDEX_REGION,
     METADATA_INDEX_TABLE_NAME)
-from constants.common_constants import RUNNING_TESTS
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +100,7 @@ def _build_table():
 
 def _get_table():
     """Return the cached Table resource, building it on first use. Tests patch this
-    (or set ``_TABLE``) to a mock, mirroring the ``libs/s3.py`` shim."""
+    (or ``_query`` / ``study_summary``) so the build path never runs without AWS."""
     global _TABLE
     if _TABLE is None:
         _TABLE = _build_table()
@@ -131,9 +130,13 @@ def _parse_time(iso: str):
     if not iso:
         return None
     try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # Defensive: a stored time without a tz designator would make `now - dt` raise
+    # (naive vs aware), an uncaught error outside the typed-failure model. Treat
+    # naive as UTC (the writer's upload_time basis).
+    return dt if dt.tzinfo else dt.replace(tzinfo=dt_timezone.utc)
 
 
 def ago(iso: str, now: datetime) -> str:
@@ -162,12 +165,17 @@ def is_valid_object_id(object_id) -> bool:
 # --- aggregation (pure; operates on already-fetched items) -------------------
 
 def aggregate_daily(items: list) -> dict:
-    """STUDY#<obj> / DAY# rollups -> {day: {count, bytes}}."""
+    """Sum DAY# rollup items into {day: {count, bytes}}. Accepts items from one
+    partition or several merged together (e.g. all per-stream rollups), summing
+    per day -- so the study daily trend can be derived from the per-stream rollups."""
     out = {}
     for it in items:
         sk = it.get("SK", "")
         if sk.startswith(_DAY_PREFIX):
-            out[sk[len(_DAY_PREFIX):]] = {"count": _num(it.get("count")), "bytes": _num(it.get("bytes"))}
+            day = sk[len(_DAY_PREFIX):]
+            bucket = out.setdefault(day, {"count": 0, "bytes": 0})
+            bucket["count"] += _num(it.get("count"))
+            bucket["bytes"] += _num(it.get("bytes"))
     return out
 
 
@@ -193,7 +201,7 @@ def aggregate_latest(items: list) -> tuple[dict, dict]:
 
 # --- the one public entry point ----------------------------------------------
 
-def study_summary(study_object_id: str, stale_hours: int = 24, now: datetime = None) -> dict:
+def study_summary(study_object_id: str, stale_hours: int = 24, now: datetime | None = None) -> dict:
     """Return the aggregated per-study dashboard views, or raise a typed signal.
 
     Raises MetadataIndexNotConfigured / MetadataIndexInvalidStudy /
@@ -210,7 +218,6 @@ def study_summary(study_object_id: str, stale_hours: int = 24, now: datetime = N
     pk = f"STUDY#{study_object_id}"
 
     try:
-        daily_items = _query(pk, _DAY_PREFIX)
         latest_items = _query(pk, _LATEST_PREFIX)
         participant_latest, stream_latest = aggregate_latest(latest_items)
         streams = sorted({stream for (_patient, stream) in stream_latest})
@@ -224,7 +231,11 @@ def study_summary(study_object_id: str, stale_hours: int = 24, now: datetime = N
         logger.warning("metadata index read failed: %s", type(e).__name__)
         raise MetadataIndexReadError() from e
 
-    daily = aggregate_daily(daily_items)
+    # Derive the study daily trend + totals from the per-stream rollups (always
+    # written) rather than the WRITE_STUDY_ROLLUP-gated STUDY#<obj>/DAY# rollup, so
+    # the page stays correct when that optional study-level rollup is disabled for
+    # hot-partition relief -- and it saves the extra Query (cost is now 1 + #streams).
+    daily = aggregate_daily([row for rows in stream_rollups.values() for row in rows])
     return _build_views(daily, participant_latest, stream_latest, stream_rollups, now, stale_seconds, stale_hours)
 
 
@@ -329,9 +340,3 @@ def _query(pk: str, sk_prefix: str) -> list:
         if not lek:
             return items
         kwargs["ExclusiveStartKey"] = lek
-
-
-if RUNNING_TESTS:
-    # Mirror libs/s3.py: keep the module importable in tests without AWS. Tests
-    # either set _TABLE to a fake or patch _query / study_summary directly.
-    _TABLE = None
