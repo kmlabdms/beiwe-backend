@@ -133,13 +133,52 @@ is a deliberate procedure, not something TTL satisfies. To erase a participant:
 > reasonable future addition so the procedure is equally runnable by a human, an agent,
 > or a CI job — deferred with the rest of the Phase 2 operational tooling.
 
-## Reader access (Grafana and humans)
+## Reader access (the Beiwe web app, Grafana, humans)
 
 Read the table via the least-privilege `MetadataIndexReaderRole` (the
 `ReaderRoleArn` stack output): `dynamodb:Query` + `GetItem` only, no `Scan`, no
-writes. Grant `sts:AssumeRole` on it to the specific Grafana datasource principal
-— **do not** read the table with the account-wide AdministratorAccess deploy user.
-The table is effectively a full participant-upload roster.
+writes. Grant `sts:AssumeRole` on it to the specific reader principal — **do not**
+read the table with the account-wide AdministratorAccess deploy user. The table is
+effectively a full participant-upload roster.
+
+Scope the role's **trust** to that principal at deploy time so it isn't assumable
+account-wide:
+
+```bash
+cdk deploy MetadataIndexStack -c enable_metadata_index=true \
+  -c reader_principal_arn=arn:aws:iam::<acct>:user/<beiwe-web-iam-user>
+```
+
+### Wiring the in-app dashboard (`endpoints/metadata_dashboard_endpoints.py`)
+
+The Django web tier reads the index by assuming `ReaderRoleArn` with its existing
+`BEIWE_SERVER_AWS_*` credentials (refreshable STS creds; no expiry on a long-lived
+worker). Two sides must both be in place:
+
+1. **Trust** — deploy with `reader_principal_arn` set to the web server's IAM
+   principal (above).
+2. **Caller permission** — attach `sts:AssumeRole` on the `ReaderRoleArn` to that
+   same principal (this is an out-of-band IAM edit on the web user/role, not part of
+   this stack). Fallback if you cannot use assume-role: grant that principal
+   `dynamodb:Query`/`GetItem` directly on the table ARN.
+3. **App settings** — set `METADATA_INDEX_ENABLED=true`, `METADATA_INDEX_TABLE_NAME`
+   (the `TableName` output), `METADATA_INDEX_REGION`, and `METADATA_INDEX_READER_ROLE_ARN`
+   (the `ReaderRoleArn` output) in the web environment; keep `DEBUG=False`.
+
+**Verify before relying on the page** (run as the web principal):
+
+```bash
+CREDS=$(aws sts assume-role --role-arn "$ReaderRoleArn" --role-session-name verify --query Credentials --output json)
+AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .AccessKeyId) \
+AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .SecretAccessKey) \
+AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .SessionToken) \
+aws dynamodb query --table-name "$TableName" \
+  --key-condition-expression "PK = :pk AND begins_with(SK, :sk)" \
+  --expression-attribute-values '{":pk":{"S":"STUDY#<study24>"},":sk":{"S":"DAY#"}}'
+```
+
+If the grant is missing the dashboard surfaces a loud "could not reach the index"
+state (it never silently looks "disabled").
 
 ## Observability
 
