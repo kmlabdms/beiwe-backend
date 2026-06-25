@@ -66,7 +66,7 @@ prod-collect-static:
 #   make metadata-index-deploy AWS_PROFILE=eb-cli            # preview
 #   make metadata-index-deploy AWS_PROFILE=eb-cli APPLY=true # deploy + set web env
 METADATA_INDEX_SCRIPT := cluster_management/cdk/deploy_metadata_index.sh
-export AWS_PROFILE AWS_REGION READER_PRINCIPAL_ARN EB_ENV STACK_NAME I_UNDERSTAND_THIS_DELETES_DATA
+export AWS_PROFILE AWS_REGION READER_PRINCIPAL_ARN EB_APP EB_ENV STACK_NAME I_UNDERSTAND_THIS_DELETES_DATA
 
 .PHONY: metadata-index-web-arn metadata-index-outputs metadata-index-set-env metadata-index-deploy metadata-index-reset
 

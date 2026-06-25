@@ -190,11 +190,15 @@ make metadata-index-deploy  AWS_PROFILE=<p> APPLY=true  # actually deploy the st
 make metadata-index-set-env AWS_PROFILE=<p> APPLY=true  # just (re)set the EB web env from stack outputs
 ```
 
+All resolution and mutation go through the `aws` CLI (no `eb` CLI dependency).
 `deploy` auto-derives `reader_principal_arn` (the principal that assumes the reader
-role) via `aws sts get-caller-identity` on the `BEIWE_SERVER_AWS_*` credentials, or
-from the EB env's access-key id; override with `READER_PRINCIPAL_ARN=...`. The web
-env vars are written with `eb setenv` (the EB env from `.elasticbeanstalk/config.yml`,
-overridable via `EB_ENV=...`).
+role) by reading the web env's `BEIWE_SERVER_AWS_ACCESS_KEY_ID` off the EB environment
+and mapping it to its IAM user (or, if the web tier has no such keys, the EB
+instance-profile role); override with `READER_PRINCIPAL_ARN=...`. The web env vars are
+written with `aws elasticbeanstalk update-environment` against `EB_APP`/`EB_ENV`
+(default `beiwe-application` / `kowalski-beiwe`, overridable). The deployer's profile
+needs `elasticbeanstalk:*`, `iam:GetAccessKeyLastUsed`/`GetInstanceProfile`, and
+`cloudformation:DescribeStacks`.
 
 The destructive schema reset is deliberately separate and double-gated:
 

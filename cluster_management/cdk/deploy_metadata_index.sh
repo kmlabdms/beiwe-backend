@@ -2,7 +2,7 @@
 #
 # deploy_metadata_index.sh -- one-stop deploy/config for the Upload Metadata Index
 # dashboard. Wraps the manual steps from METADATA_INDEX.md so a deploy is a single
-# command instead of a checklist. Read-only by default where it can be.
+# command instead of a checklist. Uses only the `aws` CLI + `cdk` (no `eb` CLI).
 #
 # Subcommands:
 #   web-arn            Resolve + print the IAM principal ARN the web tier uses at
@@ -10,9 +10,9 @@
 #                      the value for `-c reader_principal_arn` (scopes the trust).
 #   outputs            Print the deployed stack's outputs as KEY=VALUE.
 #   set-env            Set the METADATA_INDEX_* vars on the EB web env from the stack
-#                      outputs via `eb setenv`. Preview-only unless --apply.
+#                      outputs (elasticbeanstalk update-environment). Preview unless --apply.
 #   deploy             cdk deploy the stack (enable + scoped trust), then set-env.
-#                      Preview-only unless --apply.
+#                      Preview unless --apply.
 #   reset              Print (or, with --execute, run) the DESTRUCTIVE ordered-drain
 #                      reset for a schema change. Separate on purpose.
 #
@@ -20,7 +20,8 @@
 #   AWS_PROFILE              profile for aws + cdk calls (default: credential chain)
 #   AWS_REGION               region (default: us-east-1)  -> METADATA_INDEX_REGION
 #   STACK_NAME               CFN stack (default: MetadataIndexStack)
-#   EB_ENV                   EB environment (default: eb's configured default)
+#   EB_APP                   EB application (default: beiwe-application)
+#   EB_ENV                   EB environment (default: kowalski-beiwe)
 #   READER_PRINCIPAL_ARN     override the auto-derived web principal ARN
 #
 # Flags: --apply (perform mutations), --execute (reset only), --profile, --region.
@@ -33,47 +34,57 @@ set -euo pipefail
 AWS_REGION="${AWS_REGION:-us-east-1}"
 STACK_NAME="${STACK_NAME:-MetadataIndexStack}"
 AWS_PROFILE="${AWS_PROFILE:-}"
-EB_ENV="${EB_ENV:-}"
+EB_APP="${EB_APP:-beiwe-application}"
+EB_ENV="${EB_ENV:-kowalski-beiwe}"
 READER_PRINCIPAL_ARN="${READER_PRINCIPAL_ARN:-}"
 APPLY=false
 EXECUTE=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # cluster_management/cdk
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"                        # repo root (has .elasticbeanstalk)
 
 die() { echo "error: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH"; }
-
-# aws/eb take --profile differently; build the aws profile arg once.
 aws_profile_arg() { [ -n "$AWS_PROFILE" ] && printf -- '--profile %s' "$AWS_PROFILE" || true; }
 
 cfn_output() {  # $1 = OutputKey
   aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" $(aws_profile_arg) \
-    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null
+    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" --output text 2>/dev/null
+}
+
+eb_env_value() {  # $1 = env var name set on the EB web environment
+  aws elasticbeanstalk describe-configuration-settings \
+    --application-name "$EB_APP" --environment-name "$EB_ENV" --region "$AWS_REGION" $(aws_profile_arg) \
+    --query "ConfigurationSettings[0].OptionSettings[?Namespace=='aws:elasticbeanstalk:application:environment' && OptionName=='$1'].Value | [0]" \
+    --output text 2>/dev/null
 }
 
 # --- resolve the web principal ARN (the runtime assume-role caller) --------------
+# The web tier either uses explicit IAM-user keys (BEIWE_SERVER_AWS_*, set as EB env
+# properties) -> the principal is that IAM user; or it falls back to the EB instance
+# profile -> the principal is that role. Handle both, all via the aws CLI so it works
+# from a laptop with just an admin profile (no eb CLI, no server secrets).
 resolve_web_arn() {
-  if [ -n "$READER_PRINCIPAL_ARN" ]; then
-    echo "$READER_PRINCIPAL_ARN"; return
+  if [ -n "$READER_PRINCIPAL_ARN" ]; then echo "$READER_PRINCIPAL_ARN"; return; fi
+  have aws
+  local account; account="$(aws sts get-caller-identity --region "$AWS_REGION" $(aws_profile_arg) --query Account --output text)" \
+    || die "aws sts get-caller-identity failed -- check AWS_PROFILE/credentials"
+
+  local key_id; key_id="$(eb_env_value BEIWE_SERVER_AWS_ACCESS_KEY_ID)"
+  if [ -n "$key_id" ] && [ "$key_id" != "None" ]; then
+    local user; user="$(aws iam get-access-key-last-used --access-key-id "$key_id" $(aws_profile_arg) --query UserName --output text 2>/dev/null)"
+    [ -n "$user" ] && [ "$user" != "None" ] || die "could not map the web access key to an IAM user; set READER_PRINCIPAL_ARN"
+    echo "arn:aws:iam::${account}:user/${user}"; return
   fi
-  # Best signal: ask STS who the web credentials actually are.
-  if [ -n "${BEIWE_SERVER_AWS_ACCESS_KEY_ID:-}" ] && [ -n "${BEIWE_SERVER_AWS_SECRET_ACCESS_KEY:-}" ]; then
-    AWS_ACCESS_KEY_ID="$BEIWE_SERVER_AWS_ACCESS_KEY_ID" \
-    AWS_SECRET_ACCESS_KEY="$BEIWE_SERVER_AWS_SECRET_ACCESS_KEY" \
-    AWS_SESSION_TOKEN="" \
-      aws sts get-caller-identity --region "$AWS_REGION" --query Arn --output text && return
-  fi
-  # Fallback: derive from the access key id stored in the EB env (no secret needed,
-  # but the deployer needs iam:GetAccessKeyLastUsed + sts:GetCallerIdentity).
-  have eb
-  local key_id account user
-  key_id="$(cd "$REPO_ROOT" && eb printenv ${EB_ENV:+$EB_ENV} 2>/dev/null \
-    | sed -n 's/.*BEIWE_SERVER_AWS_ACCESS_KEY_ID *= *//p' | tr -d '[:space:]')"
-  [ -n "$key_id" ] || die "could not resolve the web principal ARN; set READER_PRINCIPAL_ARN or BEIWE_SERVER_AWS_* and retry"
-  user="$(aws iam get-access-key-last-used --access-key-id "$key_id" $(aws_profile_arg) --query UserName --output text)"
-  account="$(aws sts get-caller-identity --region "$AWS_REGION" $(aws_profile_arg) --query Account --output text)"
-  echo "arn:aws:iam::${account}:user/${user}"
+
+  # No IAM-user keys on the env -> the web tier uses its instance-profile role.
+  local profile_name; profile_name="$(aws elasticbeanstalk describe-configuration-settings \
+    --application-name "$EB_APP" --environment-name "$EB_ENV" --region "$AWS_REGION" $(aws_profile_arg) \
+    --query "ConfigurationSettings[0].OptionSettings[?OptionName=='IamInstanceProfile'].Value | [0]" --output text 2>/dev/null)"
+  [ -n "$profile_name" ] && [ "$profile_name" != "None" ] || die "could not resolve the web principal; set READER_PRINCIPAL_ARN"
+  local role_arn; role_arn="$(aws iam get-instance-profile --instance-profile-name "$profile_name" $(aws_profile_arg) \
+    --query 'InstanceProfile.Roles[0].Arn' --output text 2>/dev/null)"
+  [ -n "$role_arn" ] && [ "$role_arn" != "None" ] || die "could not resolve the instance-profile role; set READER_PRINCIPAL_ARN"
+  echo "$role_arn"
 }
 
 # --- subcommands ----------------------------------------------------------------
@@ -90,20 +101,26 @@ cmd_outputs() {
 }
 
 cmd_set_env() {
-  have aws; have eb
+  have aws
   local table reader
   table="$(cfn_output TableName)"; reader="$(cfn_output ReaderRoleArn)"
   [ -n "$table" ] && [ "$table" != "None" ] || die "no TableName output on stack '$STACK_NAME' (deploy it first)"
-  local kv=(
-    "METADATA_INDEX_ENABLED=true"
-    "METADATA_INDEX_TABLE_NAME=$table"
-    "METADATA_INDEX_REGION=$AWS_REGION"
-    "METADATA_INDEX_READER_ROLE_ARN=$reader"
+  local ns="aws:elasticbeanstalk:application:environment"
+  local opts=(
+    "Namespace=$ns,OptionName=METADATA_INDEX_ENABLED,Value=true"
+    "Namespace=$ns,OptionName=METADATA_INDEX_TABLE_NAME,Value=$table"
+    "Namespace=$ns,OptionName=METADATA_INDEX_REGION,Value=$AWS_REGION"
+    "Namespace=$ns,OptionName=METADATA_INDEX_READER_ROLE_ARN,Value=$reader"
   )
-  echo "eb setenv ${kv[*]} ${EB_ENV}"
+  echo "set on EB env '$EB_ENV' (app '$EB_APP'):"
+  echo "  METADATA_INDEX_ENABLED=true"
+  echo "  METADATA_INDEX_TABLE_NAME=$table"
+  echo "  METADATA_INDEX_REGION=$AWS_REGION"
+  echo "  METADATA_INDEX_READER_ROLE_ARN=$reader"
   if $APPLY; then
-    echo ">> applying to the EB web environment (rolling update)..."
-    ( cd "$REPO_ROOT" && eb setenv "${kv[@]}" ${EB_ENV:+$EB_ENV} )
+    echo ">> applying via elasticbeanstalk update-environment (rolling update)..."
+    aws elasticbeanstalk update-environment --application-name "$EB_APP" --environment-name "$EB_ENV" \
+      --region "$AWS_REGION" $(aws_profile_arg) --option-settings "${opts[@]}"
   else
     echo "(preview only -- re-run with --apply to set these on the EB environment)"
   fi
