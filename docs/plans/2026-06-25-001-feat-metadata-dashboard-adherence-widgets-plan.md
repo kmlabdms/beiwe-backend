@@ -1,7 +1,7 @@
 ---
 title: "feat: Metadata dashboard Tier 2 — adherence heatmap, sparklines, enrollment"
 type: feat
-status: active
+status: completed
 date: 2026-06-25
 deepened: 2026-06-25
 origin: docs/plans/2026-06-24-001-feat-metadata-index-dashboard-plan.md  # Tier 2 builds on the dashboard
