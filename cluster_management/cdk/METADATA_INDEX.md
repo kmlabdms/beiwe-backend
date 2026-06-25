@@ -153,17 +153,28 @@ cdk deploy MetadataIndexStack -c enable_metadata_index=true \
 
 The Django web tier reads the index by assuming `ReaderRoleArn` with its existing
 `BEIWE_SERVER_AWS_*` credentials (refreshable STS creds; no expiry on a long-lived
-worker). Two sides must both be in place:
+worker).
 
-1. **Trust** — deploy with `reader_principal_arn` set to the web server's IAM
-   principal (above).
-2. **Caller permission** — attach `sts:AssumeRole` on the `ReaderRoleArn` to that
-   same principal (this is an out-of-band IAM edit on the web user/role, not part of
-   this stack). Fallback if you cannot use assume-role: grant that principal
-   `dynamodb:Query`/`GetItem` directly on the table ARN.
-3. **App settings** — set `METADATA_INDEX_ENABLED=true`, `METADATA_INDEX_TABLE_NAME`
-   (the `TableName` output), `METADATA_INDEX_REGION`, and `METADATA_INDEX_READER_ROLE_ARN`
-   (the `ReaderRoleArn` output) in the web environment; keep `DEBUG=False`.
+**Authorization is same-account.** The web tier and this stack live in the same AWS
+account, and assume-role authorization can come from *either* side of the trust:
+
+- **Recommended (scoped trust, no extra IAM):** deploy with `reader_principal_arn`
+  set to the web server's IAM principal. For same-account assumption, a trust policy
+  that names a *specific* principal is sufficient on its own — **no identity-based
+  `sts:AssumeRole` grant on the web principal is required.** Deploying the stack is
+  the whole authorization step.
+- **Identity-side grant is only needed if:** you used the `AccountRootPrincipal`
+  fallback (omitted `reader_principal_arn`, so the trust delegates to the account and
+  the caller must hold its own `sts:AssumeRole` on the role ARN), **or** an SCP /
+  permission boundary on the web principal requires an explicit allow. This grant is
+  an out-of-band IAM edit on the web user/role because that principal is provisioned
+  by the EB / `launch_script.py` deployment, not by this additive stack (which never
+  mutates Beiwe-owned IAM). Last-resort fallback: grant the web principal
+  `dynamodb:Query`/`GetItem` directly on the table ARN.
+
+Then **app settings** — set `METADATA_INDEX_ENABLED=true`, `METADATA_INDEX_TABLE_NAME`
+(the `TableName` output), `METADATA_INDEX_REGION`, and `METADATA_INDEX_READER_ROLE_ARN`
+(the `ReaderRoleArn` output) in the web environment; keep `DEBUG=False`.
 
 **Verify before relying on the page** (run as the web principal):
 
