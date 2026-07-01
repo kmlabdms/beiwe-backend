@@ -39,6 +39,8 @@ EB_ENV="${EB_ENV:-kowalski-beiwe}"
 READER_PRINCIPAL_ARN="${READER_PRINCIPAL_ARN:-}"
 APPLY=false
 EXECUTE=false
+_BF_RULE=""           # backfill: rule name + disabled-state, for the re-enable trap
+_BF_RULE_DISABLED=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # cluster_management/cdk
 
@@ -173,8 +175,77 @@ EOF
   fi
 }
 
+_sqs_depth() {  # $1 = url; sets _Q_VIS/_Q_NOTVIS in the current shell (so a failed aws aborts)
+  local out
+  out="$(aws sqs get-queue-attributes --queue-url "$1" --region "$AWS_REGION" $(aws_profile_arg) \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' --output text)" \
+    || die "could not read queue attributes for $1 (aws error) -- aborting before any write"
+  read -r _Q_VIS _Q_NOTVIS <<<"$out"
+  [[ "${_Q_VIS:-}" =~ ^[0-9]+$ && "${_Q_NOTVIS:-}" =~ ^[0-9]+$ ]] \
+    || die "unexpected queue attributes for $1: '$out'"
+}
+
+_wait_drained() {  # $1 = main queue url; poll until empty (the live writer drains it)
+  local url="$1" tries=0
+  while :; do
+    _sqs_depth "$url"
+    [ "$_Q_VIS" = "0" ] && [ "$_Q_NOTVIS" = "0" ] && break
+    tries=$((tries + 1))
+    [ "$tries" -gt 60 ] && die "main queue did not drain after ~5min: $url ($_Q_VIS visible / $_Q_NOTVIS in-flight)"
+    echo "   draining $url: $_Q_VIS visible / $_Q_NOTVIS in-flight ..."
+    sleep 5
+  done
+}
+
+_assert_empty() {  # $1 = DLQ url; one-shot -- a DLQ never self-drains, so don't poll it
+  _sqs_depth "$1"
+  [ "$_Q_VIS" = "0" ] && [ "$_Q_NOTVIS" = "0" ] \
+    || die "DLQ not empty ($_Q_VIS + $_Q_NOTVIS messages): redrive or clear it before backfilling -- $1"
+}
+
+_reenable_rule_on_exit() {  # safety net: if we exit after disabling, turn ingestion back on
+  [ "$_BF_RULE_DISABLED" = "1" ] || return 0
+  echo ">> (cleanup) re-enabling ingestion rule after an early exit ..." >&2
+  aws events enable-rule --name "$_BF_RULE" --region "$AWS_REGION" $(aws_profile_arg) || true
+}
+
+cmd_backfill() {
+  # Non-destructive: derive the participant-daily aggregate + first-seen from the
+  # existing per-stream rollups via SET, while ingestion is paused. Drains the main
+  # queue by WAITING (the live writer finishes queued uploads into the rollups) --
+  # never purges; the DLQ must already be empty.
+  have aws; have python3
+  local rule queue dlq
+  rule="$(cfn_output EventBridgeRuleName)"; queue="$(cfn_output QueueUrl)"; dlq="$(cfn_output DlqUrl)"
+  [ -n "$rule" ] && [ "$rule" != "None" ] || die "no stack outputs; deploy MetadataIndexStack first"
+  local py=("$SCRIPT_DIR/backfill_participant_daily.py" --region "$AWS_REGION" --stack "$STACK_NAME")
+  [ -n "$AWS_PROFILE" ] && py+=(--profile "$AWS_PROFILE")
+  if ! $APPLY; then
+    echo "PREVIEW: assert DLQ empty -> disable rule $rule -> wait for main queue to drain -> SET-backfill -> re-enable rule."
+    python3 "${py[@]}"
+    echo "(preview only -- re-run with --apply to pause ingestion and write)"
+    return
+  fi
+  _assert_empty "$dlq"                              # fail fast, before touching ingestion
+  _BF_RULE="$rule"
+  trap _reenable_rule_on_exit EXIT                  # re-enable the rule even if a later step dies
+  echo ">> disabling ingestion rule $rule ..."
+  aws events disable-rule --name "$rule" --region "$AWS_REGION" $(aws_profile_arg)
+  _BF_RULE_DISABLED=1
+  echo ">> draining main queue (waiting, not purging) ..."
+  _wait_drained "$queue"
+  echo ">> backfilling (SET from existing rollups) ..."
+  python3 "${py[@]}" --apply
+  echo ">> re-enabling ingestion rule ..."
+  aws events enable-rule --name "$rule" --region "$AWS_REGION" $(aws_profile_arg)
+  _BF_RULE_DISABLED=0
+  trap - EXIT
+  echo ">> backfill complete; ingestion resumed."
+}
+
 # --- arg parsing ----------------------------------------------------------------
-[ $# -ge 1 ] || die "usage: $0 {web-arn|outputs|set-env|deploy|reset} [--apply|--execute] [--profile P] [--region R]"
+[ $# -ge 1 ] || die "usage: $0 {web-arn|outputs|set-env|deploy|backfill|reset} [--apply|--execute] [--profile P] [--region R]"
 SUBCMD="$1"; shift
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -192,6 +263,7 @@ case "$SUBCMD" in
   outputs)  cmd_outputs ;;
   set-env)  cmd_set_env ;;
   deploy)   cmd_deploy ;;
+  backfill) cmd_backfill ;;
   reset)    cmd_reset ;;
   *) die "unknown subcommand: $SUBCMD" ;;
 esac

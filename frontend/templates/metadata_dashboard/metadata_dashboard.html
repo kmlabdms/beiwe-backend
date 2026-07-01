@@ -87,6 +87,55 @@
     </tbody>
   </table>
 
+  {# ---- adherence heatmap (participant x day; server-rendered, no JS lib) ---- #}
+  <h3>Daily adherence <small class="text-muted">(last {{ summary.adherence.days|length }} days)</small></h3>
+  {% if not summary.adherence.available %}
+  {# has_data is true but the participant-daily aggregate is empty: writer deployed, backfill not yet run. #}
+  <div class="alert alert-info">
+    No per-participant daily data yet &mdash; run the metadata-index backfill to populate adherence
+    history. Newly uploaded data also fills in going forward.
+  </div>
+  {% else %}
+  <style>
+    .adh-grid { border-collapse: collapse; }
+    .adh-grid td { width: 11px; height: 11px; padding: 0; border: 1px solid #2b3e50; }
+    .adh-grid th { font-weight: normal; text-align: right; padding: 0 6px; white-space: nowrap; font-size: 11px; }
+    .adh-zero { background: #3a4a5a; }
+    .adh-pre { background: transparent; }
+    .adh-swatch { display: inline-block; width: 11px; height: 11px; vertical-align: middle; margin: 0 2px 0 10px; border: 1px solid #2b3e50; }
+    .adh-swatch.adh-data { background: #28a745; }
+  </style>
+  <p class="text-muted" style="margin-bottom: 4px">
+    <span class="adh-swatch adh-data"></span> uploaded
+    <span class="adh-swatch adh-zero"></span> no upload
+    <span class="adh-swatch adh-pre"></span> before first upload
+    {% if summary.adherence.omitted %}
+      &mdash; showing {{ summary.adherence.rows|length }} most-active participants
+      ({{ summary.adherence.omitted }} more not shown)
+    {% endif %}
+  </p>
+  <div style="overflow-x: auto">
+    <table class="adh-grid">
+      {% for r in summary.adherence.rows %}
+      <tr>
+        <th>{{ r.patient }}</th>
+        {% for c in r.cells %}
+        {% if c.state == 'data' %}
+        <td title="{{ r.patient }} {{ c.day }}: {{ c.count }} uploads"
+            style="background: rgba(40,167,69,{{ 0.25 + 0.75 * c.count / summary.adherence.peak }})"></td>
+        {% elif c.state == 'zero' %}
+        <td class="adh-zero" title="{{ r.patient }} {{ c.day }}: no upload"></td>
+        {% else %}
+        <td class="adh-pre" title="{{ r.patient }} {{ c.day }}: before first upload"></td>
+        {% endif %}
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  <p class="text-muted" style="font-size: 11px">{{ summary.adherence.days[0] }} &rarr; {{ summary.adherence.days[-1] }}</p>
+  {% endif %}
+
   {# ---- 3. per-participant freshness (grouped by participant) ---- #}
   <h3>Participant &amp; stream freshness</h3>
   {% for p in summary.participants %}
@@ -99,6 +148,14 @@
       {% endif %}
       <strong>{{ p.patient }}</strong>
       <span class="text-muted">last upload {{ p.ago }}</span>
+      {% if p.spark and max(p.spark) %}
+      {% set n = p.spark|length %}
+      {% set mx = max(p.spark) %}
+      <svg width="120" height="20" style="vertical-align: middle; float: right"
+           aria-label="daily upload trend for {{ p.patient }}">
+        <polyline fill="none" stroke="#5bc0de" stroke-width="1" points="{% for v in p.spark %}{{ '%.1f'|format(loop.index0 * 120 / (n - 1 if n > 1 else 1)) }},{{ '%.1f'|format(19 - v / mx * 18) }} {% endfor %}"/>
+      </svg>
+      {% endif %}
     </div>
     <table class="table table-condensed">
       <thead><tr><th>Stream</th><th>Last upload</th><th class="text-right">Last file</th><th></th></tr></thead>
@@ -150,6 +207,21 @@
       {% endfor %}
     </tbody>
   </table>
+
+  {# ---- enrollment over time (cumulative first-seen; inline SVG, no JS lib) ---- #}
+  <h3>Enrollment <small class="text-muted">({{ summary.enrollment.total }} participants)</small></h3>
+  {% if summary.enrollment.points %}
+  {% set pts = summary.enrollment.points %}
+  {% set np = pts|length %}
+  {% set total = summary.enrollment.total %}
+  <svg width="100%" height="120" viewBox="0 0 600 120" preserveAspectRatio="none"
+       style="background: #2b3e50" aria-label="cumulative enrollment over time">
+    <polyline fill="none" stroke="#28a745" stroke-width="2" points="{% for pt in pts %}{{ '%.1f'|format(loop.index0 * 600 / (np - 1 if np > 1 else 1)) }},{{ '%.1f'|format(115 - pt.cumulative / total * 110) }} {% endfor %}"/>
+  </svg>
+  <p class="text-muted" style="font-size: 11px">{{ pts[0].day }} &rarr; {{ pts[-1].day }}</p>
+  {% else %}
+  <p class="text-muted">No enrollment data yet.</p>
+  {% endif %}
 
 {% endif %}
 

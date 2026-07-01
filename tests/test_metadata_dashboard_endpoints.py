@@ -5,7 +5,7 @@ from libs import metadata_index_reader as reader
 from tests.common import ResearcherSessionTest
 
 
-def _summary(patient="p1", has_data=True):
+def _summary(patient="p1", has_data=True, adherence_available=True):
     """A canned study_summary() return value matching the template's shape."""
     return {
         "has_data": has_data,
@@ -14,6 +14,7 @@ def _summary(patient="p1", has_data=True):
         "daily": [{"day": "2026-05-28", "count": 3, "bytes": 300, "bytes_h": "300 B", "pct": 100}],
         "participants": [{
             "patient": patient, "last_upload_time": "2026-05-28T20:00:00Z", "ago": "1h ago", "stale": False,
+            "spark": [2, 3],
             "streams": [{"stream": "gps", "last_upload_time": "2026-05-28T20:00:00Z",
                          "ago": "1h ago", "stale": False, "last_size": 50, "last_size_h": "50 B"}],
         }],
@@ -22,6 +23,15 @@ def _summary(patient="p1", has_data=True):
         "stream_totals": [{"stream": "gps", "count": 3, "bytes": 300, "bytes_h": "300 B",
                            "last_upload_time": "2026-05-28T20:00:00Z", "ago": "1h ago", "stale": False}],
         "stale_hours": 24,
+        "adherence": {
+            "available": adherence_available, "days": ["2026-05-27", "2026-05-28"],
+            "peak": 3, "omitted": 0,
+            "rows": [{"patient": patient, "first_day": "2026-05-27", "cells": [
+                {"day": "2026-05-27", "count": 0, "state": "zero"},
+                {"day": "2026-05-28", "count": 3, "state": "data"},
+            ]}],
+        },
+        "enrollment": {"total": 1, "points": [{"day": "2026-05-27", "cumulative": 1}]},
     }
 
 
@@ -75,8 +85,31 @@ class TestMetadataDashboard(ResearcherSessionTest):
 
     def test_patient_id_is_html_escaped(self):
         # patient_id originates from an S3 key the server never sanitizes -> must be escaped
+        # (appears in the feed, freshness, heatmap rows/cell-titles, and sparkline aria-label)
         self.set_session_study_relation(ResearcherRole.researcher)
         with patch.object(reader, "study_summary", return_value=_summary(patient="<script>alert(1)</script>")):
             resp = self.smart_get_status_code(200, str(self.session_study.id))
         self.assert_not_present("<script>alert(1)", resp.content)
         self.assert_present("&lt;script&gt;alert(1)", resp.content)
+
+    def test_adherence_heatmap_renders(self):
+        self.set_session_study_relation(ResearcherRole.researcher)
+        with patch.object(reader, "study_summary", return_value=_summary()):
+            resp = self.smart_get_status_code(200, str(self.session_study.id))
+        self.assert_present("Daily adherence", resp.content)
+        self.assert_present("before first upload", resp.content)   # legend -> heatmap rendered
+        self.assert_present("3 uploads", resp.content)             # a data cell's title
+
+    def test_adherence_pre_backfill_state(self):
+        # has_data true but the participant-daily aggregate is empty (backfill not run yet)
+        self.set_session_study_relation(ResearcherRole.researcher)
+        with patch.object(reader, "study_summary", return_value=_summary(adherence_available=False)):
+            resp = self.smart_get_status_code(200, str(self.session_study.id))
+        self.assert_present("run the metadata-index backfill", resp.content)
+        self.assert_not_present("before first upload", resp.content)  # the grid legend is not rendered
+
+    def test_enrollment_renders(self):
+        self.set_session_study_relation(ResearcherRole.researcher)
+        with patch.object(reader, "study_summary", return_value=_summary()):
+            resp = self.smart_get_status_code(200, str(self.session_study.id))
+        self.assert_present("Enrollment", resp.content)

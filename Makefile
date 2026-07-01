@@ -68,7 +68,7 @@ prod-collect-static:
 METADATA_INDEX_SCRIPT := cluster_management/cdk/deploy_metadata_index.sh
 export AWS_PROFILE AWS_REGION READER_PRINCIPAL_ARN EB_APP EB_ENV STACK_NAME I_UNDERSTAND_THIS_DELETES_DATA
 
-.PHONY: metadata-index-web-arn metadata-index-outputs metadata-index-set-env metadata-index-deploy metadata-index-reset
+.PHONY: metadata-index-web-arn metadata-index-outputs metadata-index-set-env metadata-index-deploy metadata-index-backfill metadata-index-reset
 
 metadata-index-web-arn:
 	$(METADATA_INDEX_SCRIPT) web-arn
@@ -77,10 +77,13 @@ metadata-index-outputs:
 	$(METADATA_INDEX_SCRIPT) outputs
 
 metadata-index-set-env:
-	$(METADATA_INDEX_SCRIPT) set-env $(if $(APPLY),--apply,)
+	$(METADATA_INDEX_SCRIPT) set-env $(if $(filter true,$(APPLY)),--apply,)
 
 metadata-index-deploy:
-	$(METADATA_INDEX_SCRIPT) deploy $(if $(APPLY),--apply,)
+	$(METADATA_INDEX_SCRIPT) deploy $(if $(filter true,$(APPLY)),--apply,)
+
+metadata-index-backfill:
+	$(METADATA_INDEX_SCRIPT) backfill $(if $(filter true,$(APPLY)),--apply,)
 
 metadata-index-reset:
-	$(METADATA_INDEX_SCRIPT) reset $(if $(EXECUTE),--execute,)
+	$(METADATA_INDEX_SCRIPT) reset $(if $(filter true,$(EXECUTE)),--execute,)

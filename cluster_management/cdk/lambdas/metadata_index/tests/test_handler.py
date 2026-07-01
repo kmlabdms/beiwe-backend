@@ -56,8 +56,10 @@ def table():
         os.environ["TABLE_NAME"] = TABLE_NAME
         os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
         handler._TABLE = None  # force lazy rebuild inside the mock
+        dynamo_writer._config_ensured = False  # re-arm the per-container CONFIG write
         yield tbl
         handler._TABLE = None
+        dynamo_writer._config_ensured = False
         os.environ.pop("TABLE_NAME", None)
 
 
@@ -67,6 +69,12 @@ def _item(table, pk, sk):
 
 def _stream_rollup(table, stream):
     return _item(table, f"STUDY#{STUDY}#P#{PATIENT}#S#{stream}", f"DAY#{DAY}")
+
+
+def _participant_daily(table, patient=PATIENT, day=DAY):
+    """Sharded per-participant daily aggregate (key built via the writer's shard fn)."""
+    pk = f"STUDY#{STUDY}#DAILY#{dynamo_writer._shard_for(patient)}"
+    return _item(table, pk, f"P#{patient}#DAY#{day}")
 
 
 def _study_stream_rollup(table, stream):
@@ -107,6 +115,18 @@ def test_happy_batch_writes_dedupe_latest_and_rollups(table):
     # participant + participant/stream latest pointers exist
     assert _item(table, f"STUDY#{STUDY}", f"LATEST#P#{PATIENT}") is not None
     assert _item(table, f"STUDY#{STUDY}", f"LATEST#P#{PATIENT}#S#accelerometer") is not None
+
+    # sharded per-participant daily aggregate: all 3 objects for this patient/day
+    pd = _participant_daily(table)
+    assert int(pd["count"]) == 3 and int(pd["bytes"]) == 350
+
+    # day-granular first-seen pointer
+    first = _item(table, f"STUDY#{STUDY}", f"FIRST#P#{PATIENT}")
+    assert first["first_day"] == DAY
+
+    # persisted shard config (the reader asserts against this to catch drift)
+    cfg = _item(table, "CONFIG", "SHARDS")
+    assert int(cfg["value"]) == dynamo_writer.SHARDS
 
 
 # --- idempotency -------------------------------------------------------------
@@ -247,9 +267,9 @@ def test_transient_rollup_failure_rolls_back_and_retry_recounts_once(table, monk
 
 
 def test_split_brain_avoided_when_second_rollup_fails(table, monkeypatch):
-    """If the second rollup (now the study-level per-stream rollup) fails after the
+    """If the second rollup (the study-level per-stream rollup) fails after the
     participant-scoped rollup applied, the applied one is compensated and the marker
-    removed, so the retry leaves all three rollups consistent (each == 1), never
+    removed, so the retry leaves all four rollups consistent (each == 1), never
     split-brained."""
     real_add = dynamo_writer._add_rollup
     calls = {"n": 0}
@@ -267,9 +287,56 @@ def test_split_brain_avoided_when_second_rollup_fails(table, monkeypatch):
     stream = _stream_rollup(table, "gps")
     study_stream = _study_stream_rollup(table, "gps")
     study = _item(table, f"STUDY#{STUDY}", f"DAY#{DAY}")
+    pd = _participant_daily(table)
     assert int(stream["count"]) == 1 and int(stream["bytes"]) == 50
     assert int(study_stream["count"]) == 1 and int(study_stream["bytes"]) == 50  # consistent
     assert int(study["count"]) == 1 and int(study["bytes"]) == 50   # consistent, not 2-vs-1
+    assert int(pd["count"]) == 1 and int(pd["bytes"]) == 50         # participant-daily too
+
+
+def test_participant_daily_rollup_failure_compensates_and_recounts_once(table, monkeypatch):
+    """The participant-daily aggregate is the LAST target; faulting it must compensate
+    all earlier targets and un-claim, so the retry recounts every rollup exactly once."""
+    real_add = dynamo_writer._add_rollup
+    state = {"failed": False}
+
+    def flaky_add(table_, pk, sk, *a, **k):
+        # Fail the participant-daily ADD (its SK starts with "P#") exactly once, on the
+        # first delivery -- robust to target count/order and WRITE_STUDY_ROLLUP.
+        if sk.startswith("P#") and not state["failed"]:
+            state["failed"] = True
+            raise ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
+        return real_add(table_, pk, sk, *a, **k)
+
+    monkeypatch.setattr(dynamo_writer, "_add_rollup", flaky_add)
+    key = _raw_key("gps", 1779996330000)
+    r1 = handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)
+    assert r1["batchItemFailures"] == [{"itemIdentifier": "m1"}]    # returned for retry
+    assert _item(table, f"OBJ#{key}", "OBJ") is None               # marker rolled back
+    assert int(_stream_rollup(table, "gps")["count"]) == 0         # earlier target compensated to 0
+    assert _participant_daily(table) is None                       # the failed last target never applied
+
+    r2 = handler.handler(_sqs_event(_eb_message(key, 50, "m1")), None)  # SQS retry
+    assert r2["batchItemFailures"] == []
+    assert int(_stream_rollup(table, "gps")["count"]) == 1
+    assert int(_participant_daily(table)["count"]) == 1            # counted exactly once
+
+
+def test_first_seen_keeps_earliest_day(table):
+    """FIRST#P# keeps the minimum upload day; a later day doesn't change it, an
+    earlier day arriving later lowers it."""
+    early = "2026-05-20"
+    handler.handler(_sqs_event(_eb_message(_raw_key("gps", 1779996330000), 10, "d1",
+                                           time_=f"{DAY}T20:00:00Z")), None)
+    assert _item(table, f"STUDY#{STUDY}", f"FIRST#P#{PATIENT}")["first_day"] == DAY
+    # a later-day upload does not move it
+    handler.handler(_sqs_event(_eb_message(_raw_key("gps", 1779996340000), 10, "d2",
+                                           time_="2026-06-01T20:00:00Z")), None)
+    assert _item(table, f"STUDY#{STUDY}", f"FIRST#P#{PATIENT}")["first_day"] == DAY
+    # an earlier-day upload lowers it
+    handler.handler(_sqs_event(_eb_message(_raw_key("gps", 1779996350000), 10, "d3",
+                                           time_=f"{early}T20:00:00Z")), None)
+    assert _item(table, f"STUDY#{STUDY}", f"FIRST#P#{PATIENT}")["first_day"] == early
 
 
 def test_non_clienterror_isolated_to_its_message(table, monkeypatch):
